@@ -5,9 +5,10 @@ const object=properties=>({type:'object',additionalProperties:false,required:Obj
 const enumeration=(...values)=>({type:'string',enum:values});
 const cardCount=object({name:text,count:{type:'integer',minimum:1,maximum:100}});
 const deck=object({found:boolean,archetype:text,url:text,date:text,basis:text,main:array(cardCount),sideboard:array(cardCount)});
+const deckSelection=object({found:boolean,candidateId:text,archetype:text,basis:text});
 const shortlist=object({summary:text,nodes:array(object({sourceLine:integer,priority:integer,question:text,alternatives:array(text),reason:text}))});
 const goal=object({cardName:text,action:enumeration('cast','activate','play_land','avoid','pass'),abilityText:text,modes:array(text),targets:array(object({kind:enumeration('card','player'),name:text,playerId:text})),scope:enumeration('until_goals_complete','this_turn','entire_branch')});
 const intent=object({understoodIntent:text,supported:boolean,issues:array(text),goals:array(goal),constraints:array(text)});
 const sideboarding=object({plans:array(object({game:integer,playerId:text,swaps:array(object({inName:text,outName:text,count:{type:'integer',minimum:1,maximum:15}})),reason:text,uncertainties:array(text)}))});
 const winningSelection=object({selections:array(object({sourceLine:integer,candidateId:text,keep:boolean,reason:text,risks:array(text),confidence:enumeration('medium','low')}))});
-module.exports={deck,shortlist,intent,sideboarding,winningSelection,object,array,text,integer,boolean,enumeration};
+module.exports={deck,deckSelection,shortlist,intent,sideboarding,winningSelection,object,array,text,integer,boolean,enumeration};

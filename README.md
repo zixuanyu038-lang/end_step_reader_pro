@@ -1,67 +1,26 @@
-# Endstep_READER_pro
+# 本地赛事牌表库
 
-在 Codex 中使用的万智牌复盘工作台：先通看整盘找节点，用 Forge 搜索比较，再根据真实执行证据写复盘。选择节点，用中文描述新打法，即可生成含隐藏信息假设的 Endstep 分支。所有牌名保留完整英文。
+`deck-catalog.json` 是公开赛事参考列表，不包含用户回放或从用户隐藏手牌推断的数据。
 
-当前是 **Windows x64 实验预览版**，由个人开发，与 Endstep 官方无隶属关系。模型调用遵循已登录 Codex 账户的额度与使用条件。
+- 来源：[modometa/modometa-mtgo-data](https://github.com/modometa/modometa-mtgo-data)，上游原始赛事来源为 [Magic Online](https://www.mtgo.com/decklists)。
+- 随 0.4.1 提供的快照：2026-11-06 下载，20 份近期 Legacy 赛事文件，381 份按主备牌组成去重的列表。它不覆盖全部类型，也不保证与某位对手完全相同。
+- 快照保存上游提交版本、赛事日期、原始网址、文件 SHA-256；下载时还核对 Git blob SHA-1。整份列表另有完整性哈希。
+- 快照只保留参考列表与来源，没有复制上游采集器或分类器代码。上游仓库自身的许可说明见 [LICENSE.md](https://github.com/modometa/modometa-mtgo-data/blob/main/LICENSE.md)。
 
-## 仓库怎么读
+应用在本地按已观察牌的数量下界和特征稀有度检索候选，再让 AI 选择一个现有 ID；看不到的牌不作负面证据。整盘公开事实可对参考灵活位作明确标记的推定修正。
 
-完整的逐文件说明见 **[代码导览](code-guide.md)**：覆盖发布目录中的每个文件，解释主要函数、类、代码块、调用关系和修改入口。
-
-| 部分 | 主要文件 | 做什么 |
-| --- | --- | --- |
-| 页面与战报 | `index.html`、`style.css`、`app.js`、`replay.js` | 导入记录，还原局面，阅读和导出 |
-| 复盘交互与任务 | `studio.js`、`studio-server.js`、`codex-client.js` | 选择节点、提交任务、连接本机 Codex |
-| 牌表与根局面 | `match-decks.js`、`deck-service.js`、`search-source.js`、`hidden-worlds.js` | 还原组成，固定换备，构造并审计隐藏世界 |
-| 搜索与判断 | `search-review.js`、`search-branch.js`、`tree-search.js`、`winning-lines.js` | 调度搜索，筛胜局，由 AI 判断教学价值 |
-| 规则与回放 | `forge-client.js`、`forge/EngineWorker.java`、`forge-replay.js` | 执行规则，将认可轨迹写成 Endstep 回放 |
-| 兼容、工具与测试 | `branch*`、`engine.js`、`scenario.js`、`forge/`、`tests/` 等 | 保留旧协议，安装运行时，验证格式与执行边界 |
-
-推荐阅读顺序：`studio-server.js → search-review.js → tree-search.js → forge/EngineWorker.java → winning-lines.js → forge-replay.js`。旧手动分支与账本已在导览中单独标出。
-
-## Windows 启动
-
-需要 Node.js 22+ 和已登录的 Codex。无需安装 npm 运行依赖、无需额外填写 API Key；模型与额度沿用本机 Codex 配置，页面显示实际模型和推理强度。
-
-1. 首次双击 `安装Forge.cmd`：从官方 GitHub 下载固定版本 Temurin JDK17 与 Forge2.0.15，校验 SHA-256 后解压到 `%LOCALAPPDATA%\EndstepForgeProbe`，约490MB，不修改系统Java。
-2. 双击 `启动复盘.cmd`，打开 `http://127.0.0.1:8787/`。也可在 Codex 中说“把这个地址打开在右侧面板”。
-3. 导入 `.esreplay` 或原始 JSONL，点「生成整盘复盘」。文件窗口显示全部文件，直接选择 Endstep 导出的原始文件即可，无需改名或先转换。完成后选节点、描述打法，点「提炼新打法」预演，或直接「补全并重演」。
-4. 下载 `.esreplay`，在 [Endstep 本地回放](https://endstep.cc/replay/local) 选择文件。
-
-也可运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start.ps1`；开发启动用 `npm start`。`CODEX_BIN` 可指定Codex路径，`PORT` 可改端口。双击HTML只支持离线阅读，不能调用后端。这是本地软件，不是Codex原生扩展。
-
-## 牌表与换备
-
-先读取整个replay公开信息，固定一份推定牌表。能恢复的己方完整主备牌与实际换备优先使用。对手牌表由AI识别类型、联网找相近公开列表，后端独立下载核对来源哈希。公开数量与参考列表不一致的灵活位明确标注推定调整。
-
-换备是独立AI任务，输入双方完整主备牌、先后手和该局公开数量约束。允许联网查换备指南，也可自行推理；使用网页时要求在理由中给真实链接。成对换入换出由程序核对实体数量。己方实际方案保留为事实，AI建议供对照；对手推定换备固定用于对应局搜索，不随节点改变。
-
-牌表是事后还原；搜索不照抄原局未来手牌、抓牌顺序或行动。每节点使用三组固定手牌/库序，保留当时已知库顶；可含明确构造的交互压力情景，不是概率样本。
-
-整盘耗时随节点数、机器性能与模型连接变化。本机一次8节点整盘实测约31分钟，单节点意图搜索及AI二筛约5分钟；这不是速度承诺。读取已有结果及下载已保留的回放无需重新搜索。进度按节点、世界显示；取消可停止工作。已完成证据与诊断保留在本机。
-
-## 实际边界
-
-- 每次模拟重建已审计根，再让Forge重放路径；不使用已证实丢抓牌历史的GameCopier，不以旧AI账本兜底。
-- 有限预算的对抗UCT，枚举部分施法、异能、下地、模式/目标及pass。叶子用Forge策略继续到终局或预算边界，胜/负奖励为+1/−1，未终局仅用小幅材料启发值。每次模拟不调用AI；候选并非穷尽，支付、战斗与部分选择沿用Forge策略。
-- 各隐藏世界独立搜索，尚非完整信息集搜索；内置策略隐藏信息使用未全面审计，有determinization/strategy-fusion偏差。材料评分不是胜率，不能证明最优。
-- 根核对生命、可见区域/身份、牌数、横置、伤害、指示物、PT、命名、抓牌/下地/施法历史与已知库顶。支持普通堆叠法术与部分常见衍生物。
-- 附件、部分持续效果/徽记、堆叠异能、战斗声明、地下城、昼夜等未覆盖起点会拒绝搜索并列缺口；不能宣称所有机制都已恢复。
-- 先按引擎胜负筛出胜局，再集中交AI二筛：与同一固定世界的原打法比较，判断是否更稳、优势更明确、值得指导原局。不是所有胜局都保留，更不为了赢而换牌。预算内没有胜局或AI不认可改善，就不给推荐回放。
-- 自然语言变为受限玩法目标，Forge决定时机、费用、响应及后续。目标完成、引擎获胜、AI认可并且动作/终局能一致重放后才提供下载。失败与未完路线只保留私有诊断。
-- 回放来自真实引擎轨迹，保留源前缀、截断原局未来，注明来源、种子、假设和范围。gzip/JSONL重读通过后导出。当前样本已通过Endstep官方解码器并在网站加载棋盘、跳到引擎终局；这不代表所有牌或策略均已验证。
-
-## 数据与开发
-
-服务只监听127.0.0.1，检查Host、会话及写请求来源。对局、模型输入、诊断、复盘和输出在 `.endstep-data/`，已忽略，不要发布到GitHub。复盘资料通过Codex发给模型；检索访问公开网页。后端不读取或复制Codex凭据。
-
-原HTML、Markdown、TXT、原始JSONL和结构化JSON导出全部保留。`npm run build` 生成无用户对局的离线阅读页。旧手动协议和账本仅兼容旧文件，不是当前生成主流程。
+## 更新
 
 ```powershell
-npm test
-npm run test:forge
+npm run update:decks
 ```
 
-第二项是真实Forge自检，不调用AI。可设置 `REPLAY_SAMPLE` 跑私有样本回归，`ENDSTEP_DECODER` 校验缓存官方解码器。HTTP替身只验证传输，不能当模型/规则质量证明。
+默认同步最近两个月中最新的20份 Legacy 赛事文件，去重后写入 `.endstep-data/deck-catalog.json`。查询时合并内置和本机库。该命令只访问固定 GitHub 仓库，不调用 AI、不上传对局、不修改内置快照。GitHub 匿名请求有限额，达到限额时稍后再更新。
 
-模块见 [studio-architecture.md](studio-architecture.md)。官方依据：[Forge](https://github.com/Card-Forge/forge)、[Codex App Server](https://learn.chatgpt.com/docs/app-server)、[Codex 搜索](https://learn.chatgpt.com/docs/web-search)。
+维护发布快照时，运行：
+
+```powershell
+node deck-catalog.js --output data/deck-catalog.json
+```
+
+发布时应同步更新本文的日期、文件数与列表数。

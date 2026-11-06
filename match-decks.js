@@ -92,7 +92,7 @@ async function prepareMatchDecks({model,deckService,forge,ask,signal,onProgress=
     if(recorded){bases.push(recorded);continue;}
     const known=player.cards.flatMap(c=>Array.from({length:c.count},(_,i)=>({id:c.name+':'+i,name:c.name,ownerId:player.playerId})));
     const initial=Object.fromEntries([...scanned.games.values()][0]?.initialDeckSizes?Object.entries([...scanned.games.values()][0].initialDeckSizes):[]);
-    bases.push(await deckService.resolve({source:{known,initialDeckSizes:initial,game:1,global:true,deckFacts:player.cards},playerId:player.playerId,ask,signal,onProgress}));
+    bases.push(await deckService.resolve({source:{known,initialDeckSizes:initial,game:1,global:true,format:scanned.header.formatId||'Legacy',recordedAt:scanned.header.recordedAt,deckFacts:player.cards},playerId:player.playerId,ask,signal,onProgress}));
   }
   const names=[...new Set(bases.concat([...scanned.recorded.values()]).flatMap(d=>d.main.concat(d.sideboard)).map(c=>c.name.split(' // ')[0]).concat(scanned.global.flatMap(p=>p.cards.map(c=>c.name))))];
   const meta=await forge.request({command:'catalog',names},{signal}),catalog=new Map(meta.cards.map(c=>[c.name,c]));

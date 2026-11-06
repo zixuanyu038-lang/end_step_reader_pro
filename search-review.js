@@ -30,7 +30,7 @@ function seeds(source,count=3){
   const base=parseInt(digest(prefix).slice(0,8),16);return Array.from({length:count},(_,i)=>(base+Math.imul(i+1,2654435761))>>>0);
 }
 function compactEvidence(record){
-  const r=record.result;return{sourceLine:record.node.sourceLine,game:record.source.game,question:record.node.question,engine:r.engine,algorithm:r.algorithm,simulated:r.simulated,settings:r.settings,quality:r.quality||null,winningCandidates:r.winningCandidates?.length||0,
+  const r=record.result;return{sourceLine:record.node.sourceLine,game:record.source.game,question:record.node.question,engine:r.engine,algorithm:r.algorithm,simulated:r.simulated,searchElapsedMs:r.elapsedMs??null,settings:r.settings,quality:r.quality||null,winningCandidates:r.winningCandidates?.length||0,
     best:r.best,original:r.original,comparison:r.comparison,alternatives:r.alternatives,sourceUrls:[...new Set(record.worlds.flatMap(w=>w.sourceUrls))],worlds:record.worlds.map(w=>({id:w.id,seed:w.root.seed,hiddenHands:w.hiddenHands,assumptions:w.assumptions})),
     representativePath:r.representative.path,limitations:r.limitations,artifact:'node-'+record.node.sourceLine+'.json',downloadUrl:record.replayArtifact?.downloadUrl||null,replaySha256:record.replayArtifact?.sha256||null};
 }

@@ -132,7 +132,7 @@ flowchart TD
 - `createStudio()`：组装 Codex、Forge、牌表服务、模型队列和任务表；允许测试注入替身。
 - `register()`：解析并保存对局，以内容身份关联已有结果。
 - `snapshot()`、`save()`、`progress()`：整理、持久化并返回任务进度与结果。
-- `ask()`：通过模型队列提交结构化任务，保存相应输入输出。
+- `ask()`：通过队列提交结构化任务，记录排队与请求诊断，区分重试原因，推理/搜索恢复后更新提示。
 - `review()`、`run()`：分发至 `runForgeReview()` 或 `runForgeBranch()`，处理完成、取消和失败。
 - `body()`：限制并读取 JSON 请求体。
 - HTTP 处理块：检查 Host、会话、来源和写请求标识，只开放白名单静态文件及 API。
@@ -156,11 +156,12 @@ flowchart TD
 
 本机 Codex App Server 的适配器，不自行处理账号密码。
 
-- `connect()`、`start()`：启动 stdio 子进程并初始化。
+- `connect()`、`start()`：初始化并复用 stdio 子进程；默认读取提供方配置，为未自定义的官方账号选择独立 HTTP/SSE 提供方，避免 WebSocket 握手超时，不改写全局配置。自定义提供方保持原路由。
 - `send()`、`request()`：发送 JSON-RPC，按 ID 配对响应和超时。
-- `receive()`：分发响应、消息片段、完成、错误与重试通知，将输出归属到对应任务，拒绝不需要的工具授权请求。
+- `receive()`：分发响应、消息、错误与完成，将输出归属到任务；按错误类型区分重连/限流/上游重试，推理和工具活动恢复后清除提示，拒绝不需要的工具授权请求。
 - `status()`：读取账号连接和配置，返回实际模型信息。
-- `generate()`：建立临时模型会话，设置结构化输出、指令、取消和可选网页搜索，组装回答。
+- `generate()`：建立临时模型会话，设置结构化输出、指令、取消和可选网页搜索，组装回答，记录请求起止、重试和恢复时间。
+- `errorDetails()`、`redact()`：提取错误类型/HTTP状态并脱敏；诊断不保存原始推理或凭据。
 - `fail()`、`close()`：进程退出时结束等待请求、清理资源。
 
 当前模型任务关闭 shell、应用、MCP 和其他代理；牌表/换备任务可单独开启网页搜索。模型分析不会自动获得整个工作区的操作权。
@@ -215,6 +216,7 @@ flowchart TD
 | 定义 | 内容 |
 | --- | --- |
 | `deck` | 类型、公开来源、日期、依据、主备牌与张数 |
+| `deckSelection` | 本地候选的现有 ID、类型、选择理由或无合理候选 |
 | `shortlist` | 事件行、优先级、问题、替代线和原因 |
 | `intent` / `goal` | 用户意图、支持情况、有序目标、模式/目标及避免动作范围 |
 | `sideboarding` | 分局成对换入换出、数量、理由与不确定性 |
@@ -244,9 +246,25 @@ flowchart TD
 - `canonicalName()`：规范空格和标点。
 - `parseDeck()`：解析主备牌文本与数量。
 - `downloadDeck()`：从允许主机下载，检查地址、大小与超时。
-- `DeckService`：合并重复请求、读缓存、让模型找相近列表，再由后端独立下载核对，保存来源、哈希及必要修正。
+- `DeckService`：合并重复请求、读缓存，先查询本地目录并让模型选择现有候选 ID；无合理候选再联网并独立下载核对。保存来源、哈希、匹配缺口和修正，下载核验失败会记录具体原因。
 
 模型给出链接后，程序仍核验实际下载内容。
+
+### [deck-catalog.js](deck-catalog.js)
+
+- `cards()`、`normalizeDeck()`：合并实体数量，核对构筑主备牌、日期、MTGO来源与哈希，按组成生成 ID。
+- `rankCandidates()`：按格式、起始主牌数、日期过滤；对已观察牌按稀有度和数量覆盖评分，未观察牌不扣分。
+- `DeckCatalog.load()`、`find()`：校验并合并内置/本机快照，去重后返回有限候选。
+- `syncCatalog()`：固定上游仓库和提交，读取月份目录、下载有限赛事文件，校验 Git blob 及 SHA-256，原子写入快照；没有有效数据时保留原文件。
+- CLI入口：`npm run update:decks` 更新私有数据目录；维护者可用 `--output` 更新发布快照。
+
+### [data/deck-catalog.json](data/deck-catalog.json)
+
+随源码提供的公开 Legacy 参考库。保存列表、赛事来源、提交版本、来源哈希与快照完整性哈希；不含用户对局，不是对手的真实牌表。
+
+### [data/README.md](data/README.md)
+
+说明公开数据来源、当前覆盖范围、快照数量、更新命令及来源许可链接。
 
 ### [search-source.js](search-source.js)
 
@@ -283,7 +301,7 @@ flowchart TD
 - 选择/扩展：按 UCT 分配探索预算，己方最大化收益，对手最小化收益。
 - 模拟：Forge 执行路径，再用原生策略续局；限制回合、决策和引擎步数。
 - 回传：终局胜/负/和奖励 `+1/-1/0`，未终局材料启发值限制在 `±0.25`，更新访问数据。
-- 汇总：返回独立模拟统计、根动作比较、唯一胜局和无效路径等证据。
+- 汇总：返回独立模拟统计、根动作比较、唯一胜局和无效路径等证据，同时记录整节点与各隐藏世界的 `elapsedMs`。
 
 默认整盘节点每世界 32 次迭代、宽 7、深 7；意图分支 40 次、宽 7、深 9。各世界独立树，尚非完整信息集 MCTS。材料分、采样次数和模型置信度都不是胜率。
 
@@ -456,6 +474,7 @@ node branch-cli.js 原回放.esreplay branch.json 输出.esreplay
 | `npm test` | 用 Node 内置测试运行器执行 `tests/*.test.js` |
 | `npm run test:forge` | 真实 Forge 桥接自检，不调用 AI |
 | `npm run build` | 单文件离线阅读器 |
+| `npm run update:decks` | 同步公开赛事参考库到本机数据目录，不调用模型 |
 
 目前没有 npm 运行依赖，Forge、JDK 和本机 Codex 是单独运行时。
 
@@ -469,8 +488,13 @@ node branch-cli.js 原回放.esreplay branch.json 输出.esreplay
 - 定位 Node，接受可选初始对局路径。
 - 隐藏启动服务，把日志和 PID 写入数据目录。
 - 轮询就绪，输出地址或错误。
+- `-Restart`：先检查当前任务，运行中拒绝重启；核对 PID 与服务完整路径后，仅停止本安装的服务及其 Java/Codex 子进程，再启动新版本。
 
 双击启动器使用默认端口；开发时可给服务设置 `PORT` 改端口。
+
+### [重启复盘.cmd](重启复盘.cmd)
+
+调用 `start.ps1 -Restart`，用于更新后加载新后端；不会自动中断运行中的复盘。
 
 ### [安装Forge.cmd](安装Forge.cmd)
 
@@ -507,7 +531,11 @@ node branch-cli.js 原回放.esreplay branch.json 输出.esreplay
 
 ### [tests/codex-client.test.js](tests/codex-client.test.js)
 
-验证模型输出拼接、消息归属、错误处理和敏感内容处理，不能代替模型质量评估。
+验证输出拼接、消息归属、错误脱敏、限流/上游/连接分类，以及推理和网页搜索活动能清除旧重试提示；不能代替真实连接或模型质量评估。
+
+### [tests/deck-catalog.test.js](tests/deck-catalog.test.js)
+
+验证部分公开信息的匹配、主备范围和数量约束、快照完整性、来源哈希、固定候选选择与缓存，以及同步损坏数据不能覆盖有效库。
 
 ### [tests/studio.test.js](tests/studio.test.js)
 
@@ -557,6 +585,9 @@ node branch-cli.js 原回放.esreplay branch.json 输出.esreplay
 | `.endstep-data/deck-profiles/` | 整盘牌表、来源与换备 |
 | `.endstep-data/forge-reviews/` | 带版本复盘缓存 |
 | `.endstep-data/jobs/` | 任务、搜索证据和认可回放 |
+| `.endstep-data/jobs/<任务ID>/model-requests.jsonl` | 排队、模型请求时间、脱敏错误类型/状态、重试与恢复 |
+| `.endstep-data/jobs/<任务ID>/progress.jsonl` | 完整阶段进度；区别于页面只保留最近100条 |
+| `.endstep-data/deck-catalog.json` | 手动更新的公开牌表库，与内置快照合并查询 |
 | `dist/` | 离线构建；带样本构建还包含对局内容 |
 | `%LOCALAPPDATA%\EndstepForgeProbe` | JDK、Forge、下载分块及便携运行时 |
 
