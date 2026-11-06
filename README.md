@@ -25,7 +25,7 @@
 
 1. 首次双击 `安装Forge.cmd`：从官方 GitHub 下载固定版本 Temurin JDK17 与 Forge2.0.15，校验 SHA-256 后解压到 `%LOCALAPPDATA%\EndstepForgeProbe`，约490MB，不修改系统Java。
 2. 双击 `启动复盘.cmd`，打开 `http://127.0.0.1:8787/`。也可在 Codex 中说“把这个地址打开在右侧面板”。
-3. 导入 `.esreplay` 或原始 JSONL，点「生成整盘复盘」。完成后选节点、描述打法，点「提炼新打法」预演，或直接「补全并重演」。
+3. 导入 `.esreplay` 或原始 JSONL，点「生成整盘复盘」。文件窗口显示全部文件，直接选择 Endstep 导出的原始文件即可，无需改名或先转换。完成后选节点、描述打法，点「提炼新打法」预演，或直接「补全并重演」。
 4. 下载 `.esreplay`，在 [Endstep 本地回放](https://endstep.cc/replay/local) 选择文件。
 
 也可运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\start.ps1`；开发启动用 `npm start`。`CODEX_BIN` 可指定Codex路径，`PORT` 可改端口。双击HTML只支持离线阅读，不能调用后端。这是本地软件，不是Codex原生扩展。

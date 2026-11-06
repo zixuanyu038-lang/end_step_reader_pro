@@ -11,10 +11,12 @@
   <header class="masthead">
     <a class="wordmark" href="#" id="home" aria-label="返回档案首页"><svg width="25" height="30" viewBox="0 0 25 30" fill="none" aria-hidden="true"><path d="M3 2h18v26H3zM7 7h10M7 12h10M7 17h6M7 22h10" stroke="currentColor" stroke-width="1.5"/><path d="M1 5v24h18" stroke="currentColor"/></svg><span>ENDSTEP<span class="wordmark-sub">对局档案</span></span></a>
     <nav><span id="codex-connection" class="connection-status">连接 Codex…</span><button id="fullscreen" class="text-button">全屏 ⛶</button><button id="help" class="text-button">阅读说明 <span>↗</span></button><button class="import-button" id="open">导入回放 <span>＋</span></button></nav>
-    <input id="file" type="file" accept=".esreplay,.jsonl,.ndjson" hidden>
+    <!-- Some native pickers hide unregistered extensions such as .esreplay.
+         Show all files; openFile validates the gzip signature and replay contents. -->
+    <input id="file" type="file" aria-label="选择 Endstep 回放或 JSONL 文件" hidden>
   </header>
   <main id="landing" class="landing">
-    <div class="landing-copy"><p class="eyebrow">本地工具 / ENDSTEP REPLAY</p><h1>Endstep<br>复盘工作台</h1><p class="intro">整盘复盘，描述新的打法。<br>选择操作，让 Codex 推演另一条路线。</p><button class="primary" id="landing-open">选择 .esreplay 文件 <span>↗</span></button><p class="local-note"><span class="local-dot"></span>本地应用 · 使用已登录的 Codex</p></div>
+    <div class="landing-copy"><p class="eyebrow">本地工具 / ENDSTEP REPLAY</p><h1>Endstep<br>复盘工作台</h1><p class="intro">整盘复盘，描述新的打法。<br>选择操作，让 Codex 推演另一条路线。</p><button class="primary" id="landing-open">选择回放文件 <span>↗</span></button><p class="local-note"><span class="local-dot"></span>本地应用 · 使用已登录的 Codex</p></div>
     <div class="folio" aria-hidden="true"><span class="folio-corner">.ESREPLAY → JSONL</span><div class="card-illustration"><div class="line-card back"></div><div class="line-card middle"></div><div class="line-card front"><span>ENDSTEP REPLAY</span><svg viewBox="0 0 150 150"><circle cx="75" cy="75" r="48"/><circle cx="75" cy="75" r="33"/><path d="M27 75h96M75 27v96M41 41l68 68M41 109l68-68"/><path d="M75 14l7 16-7-3-7 3zM75 136l7-16-7 3-7-3z" class="fill"/></svg><i>回放 · 战报 · 原始记录</i></div></div><div class="folio-bottom"><span>01 — 导入</span><span>02 — 阅读</span><span>03 — 导出</span></div></div>
     <div class="landing-footer"><span>适用于 Endstep Replay · 格式 v1</span><span>分局阅读 / 局面快照 / 战报导出</span></div>
   </main>
