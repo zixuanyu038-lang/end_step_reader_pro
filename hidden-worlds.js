@@ -1,0 +1,144 @@
+'use strict';
+const crypto=require('node:crypto');
+const {canonicalName}=require('./deck-service');
+const clone=x=>JSON.parse(JSON.stringify(x));
+const ZONES=['hand','battlefield','graveyard','exile','commandZone'];
+const nameOf=(source,c)=>canonicalName(source.faces?.[String(c.id)]||c.name.split(' // ')[0]);
+const countCards=list=>{const m=new Map();for(const c of list)m.set(c.name,(m.get(c.name)||0)+c.count);return m;};
+const expand=m=>[...m].flatMap(([name,n])=>Array(n).fill(name));
+const counts=m=>[...m].filter(([,n])=>n>0).map(([name,count])=>({name,count}));
+function random(seed){let n=seed>>>0;return()=>{n+=0x6D2B79F5;let t=n;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return((t^t>>>14)>>>0)/4294967296;};}
+function shuffle(list,rng){for(let i=list.length-1;i>0;i--){const j=Math.floor(rng()*(i+1));[list[i],list[j]]=[list[j],list[i]];}return list;}
+function reject(message){throw Object.assign(Error(message),{code:'unsupported_root'});}
+function cardText(source,c){
+  if(c.faceDown||c.isCopyOfRealCard&&!c.isToken||c.isPhasedOut||c.isAttacking||c.isBlocking||c.attachedCards?.length)reject('当前节点包含尚未恢复的牌面状态：'+c.name+'。');
+  const name=nameOf(source,c);if(/[;|\r\n]/.test(name))reject('牌名包含不支持的局面分隔符。');
+  let head=name;
+  if(c.isToken){
+    const keys=(c.keywords||[]).map(s=>s.toLowerCase());
+    const script=/^Clue(?: Token)?$/.test(c.name)?'c_a_clue_draw':/^Spirit(?: Token)?$/.test(c.name)&&keys.includes('flying')?'w_1_1_spirit_flying':/^Angel(?: Token)?$/.test(c.name)&&keys.includes('flying')?'w_4_4_angel_flying':c.types?.includes('Creature')&&c.subtypes?.includes('Human')&&c.subtypes?.includes('Knight')&&keys.includes('trample')&&keys.includes('haste')?'r_2_2_human_knight_trample_haste':null;
+    if(script)head='T:'+script;else if(c.name!=='Thundertrap Trainer')reject('尚未支持这个起点衍生物的规则恢复：'+c.name);
+  }
+  const out=[head,`Id:${c.id}`];
+  if(c.tapped)out.push('Tapped');if(c.hasSummoningSickness)out.push('SummonSick');if(c.damage)out.push('Damage:'+c.damage);
+  if(c.isTransformed||c.isBackFace){if(!source.faces?.[String(c.id)])reject('缺少双面牌的正面资料：'+c.name);out.push('Transformed');}
+  const types={'+1/+1':'P1P1','-1/-1':'M1M1'};
+  if(Object.keys(c.counters||{}).length)out.push('Counters:'+Object.entries(c.counters).map(([k,v])=>(types[k]||k.toUpperCase())+'='+v).join(','));
+  for(const mark of c.chosenMarks||[]){
+    if(/[;|\r\n]/.test(String(mark.value)))reject('选择的值包含不支持的分隔符。');
+    if(mark.kind==='NAME')out.push('NamedCard:'+mark.value);
+    else if(mark.kind==='NUMBER')out.push('ChosenNumber:'+mark.value);
+    else if(mark.kind==='COLOR')out.push('ChosenColor:'+mark.value);
+    else if(mark.kind==='TYPE')out.push('ChosenType:'+mark.value);
+    else reject('尚未支持这个已选值：'+mark.kind);
+  }
+  if(String(c.ownerId)!==String(c.controllerId))out.push('Owner:p'+c.ownerId);
+  return out.join('|');
+}
+function buildWorld(source,decks,catalog,seed,{stressCard=null}={}){
+  const state=source.baseline;
+  if(state.players.length!==2)reject('目前只支持双人对局。');
+  if(/COMBAT|ATTACK|BLOCK|CLEANUP/.test(state.phase))reject('当前节点处于战斗或清除步骤，尚未恢复战斗声明。请选择相邻的施法节点。');
+  if(state.stack?.some(s=>s.isAbility||s.isTrigger))reject('该节点包含需要单独恢复的堆叠异能，请选择相邻的施法节点。');
+  if(state.players.some(p=>p.hasInitiative))reject('起点已有主动权，但尚未恢复完整地下城进度。');
+  if(state.isDay||state.isNight)reject('这个起点包含尚未核对恢复的昼夜状态。');
+  if(source.activeUnrestoredEffects?.length)reject('该节点仍有需要恢复的持续效果：'+source.activeUnrestoredEffects.map(e=>e.cardName).join('；'));
+  if(source.historyUncertainties?.length)reject(source.historyUncertainties.join('；'));
+  const stressRequested=stressCard;let stressApplied=false;
+  const rng=random(seed),assumptions=[],hands=[],libraries=[],adaptedDecks=[],lines=[];
+  const aliases={END_STEP:'END_OF_TURN',BEGIN_COMBAT:'COMBAT_BEGIN',DECLARE_ATTACKERS:'COMBAT_DECLARE_ATTACKERS',DECLARE_BLOCKERS:'COMBAT_DECLARE_BLOCKERS',END_COMBAT:'COMBAT_END'};
+  lines.push('turn='+state.turnNumber,'activeplayer=p'+state.activePlayerId,'activephase='+(aliases[state.phase]||state.phase));
+  let nextId=1_500_000_000;
+  const allCurrent=new Set(state.players.flatMap(p=>ZONES.flatMap(z=>p[z]||[])).concat((state.stack||[]).map(s=>s.sourceCard)).map(c=>String(c.id)));
+  for(const [index,player] of state.players.entries()){
+    const supplied=decks[index];if(!supplied?.verified)reject('隐藏世界必须使用核对过来源的牌表。');
+    const pool=countCards(supplied.main.map(c=>({...c,name:canonicalName(c.name.split(' // ')[0])}))),side=countCards(supplied.sideboard.map(c=>({...c,name:canonicalName(c.name.split(' // ')[0])})));
+    const physical=c=>c.name!=='Hidden card'&&!c.faceDown&&!c.isToken&&!(c.zone==='Command'&&!c.isCommander&&!c.isCompanion);
+    const known=ZONES.flatMap(z=>(player[z]||[]).filter(physical)).concat((state.stack||[]).filter(s=>String(s.sourceCard.ownerId)===String(player.id)).map(s=>s.sourceCard));
+    const libraryKnown=String(player.id)===String(source.header.seat)?source.known.filter(c=>String(c.ownerId)===String(player.id)&&!allCurrent.has(String(c.id))&&!c.isToken&&c.name!=='Hidden card'):[];
+    const required=new Map();for(const c of known.concat(libraryKnown)){const name=nameOf(source,c);required.set(name,(required.get(name)||0)+1);}
+    const replacements=[];
+    function removeSpare(preferLand){
+      const candidates=[...pool].filter(([name,n])=>n>(required.get(name)||0));
+      if(!candidates.length)reject('相近牌表无法容纳已知牌，需要更匹配的来源。');
+      candidates.sort((a,b)=>Number(!!catalog.get(b[0])?.land===preferLand)-Number(!!catalog.get(a[0])?.land===preferLand)||b[1]-a[1]||a[0].localeCompare(b[0]));
+      const name=candidates[0][0];pool.set(name,pool.get(name)-1);return name;
+    }
+    for(const [name,min] of required){
+      if(!catalog.get(name)?.found)reject('Forge 数据库没有这张牌：'+name);
+      while((pool.get(name)||0)<min){if(supplied.fixedForGame)reject('固定牌表与节点已知牌冲突：'+name);const removed=removeSpare(!!catalog.get(name)?.land);pool.set(name,(pool.get(name)||0)+1);replacements.push({removed,added:name,basis:'preserve a card already observed before this node'});}
+    }
+    const targetSize=source.initialDeckSizes?.[String(player.id)]||supplied.main.reduce((n,c)=>n+c.count,0);
+    if(supplied.fixedForGame&&expand(pool).length!==targetSize)reject('固定牌表张数与节点记录不一致。');
+    while(expand(pool).length>targetSize){const removed=removeSpare(false);replacements.push({removed,added:null,basis:'match recorded starting deck size'});}
+    while(expand(pool).length<targetSize){
+      const choices=supplied.main.filter(c=>!required.has(c.name));if(!choices.length)reject('无法匹配实际起始牌库张数。');
+      const added=choices[Math.floor(rng()*choices.length)].name;pool.set(added,(pool.get(added)||0)+1);replacements.push({removed:null,added,basis:'match recorded starting deck size; hypothetical extra slot'});
+    }
+    if(replacements.length>Math.ceil(targetSize*.2))reject('公开牌与找到的牌表差异过大，需要另找更接近的牌表。');
+    adaptedDecks.push({main:counts(pool),sideboard:counts(side)});
+    const totalCurrent=known.length+player.hand.filter(c=>c.name==='Hidden card'||c.faceDown).length+player.librarySize;
+    if(totalCurrent!==targetSize)reject('该节点的主牌数量与起始牌表不符，可能有备牌调取或不可见区域变化，暂不猜测区域来源。');
+    function take(name){const n=pool.get(name)||0;if(!n)reject('牌表缺少已知牌：'+name);pool.set(name,n-1);}
+    for(const c of known)take(nameOf(source,c));
+    const reserved=libraryKnown.map(c=>({id:c.id,name:nameOf(source,c)}));for(const c of reserved)take(c.name);
+    let remaining=shuffle(expand(pool),rng);
+    const hand=player.hand.map(c=>{
+      if(c.name!=='Hidden card'&&!c.faceDown)return clone(c);
+      let name;
+      if(stressCard&&String(player.id)!==String(source.header.seat)&&remaining.includes(stressCard)){
+        name=stressCard;remaining.splice(remaining.indexOf(name),1);stressCard=null;stressApplied=true;
+      }else name=remaining.pop();
+      if(!name)reject('没有足够牌填充隐藏手牌。');
+      return{id:c.id,name,ownerId:player.id,controllerId:player.id,zone:'Hand',faceDown:false,tapped:false,counters:{}};
+    });
+    let library=shuffle(reserved.concat(remaining.map(name=>({id:nextId++,name}))),rng);
+    const top=source.knownTop?.[String(player.id)]||[];
+    for(let n=top.length-1;n>=0;n--){const i=library.findIndex(c=>String(c.id)===String(top[n]));if(i<0)reject('已知牌库顶不在假设牌库中。');library.unshift(library.splice(i,1)[0]);}
+    if(library.length!==player.librarySize)reject('假设牌库长度与原节点不一致。');
+    hands.push({playerId:String(player.id),cards:hand.map(c=>c.name),hiddenCount:player.hand.filter(c=>c.name==='Hidden card'||c.faceDown).length});
+    libraries.push({playerId:String(player.id),cards:library,knownTop:top});
+    assumptions.push({id:'deck-'+player.id,playerId:String(player.id),basis:supplied.basis,archetype:supplied.archetype,sourceUrl:supplied.url,sourceSha256:supplied.sha256,hypothesisId:supplied.hypothesisId||null,deckInformationScope:supplied.deckInformationScope||'node prefix',mainDeck:supplied.main,sideboard:supplied.sideboard,sideboardPlan:supplied.sideboardPlan||null,replacements:(supplied.adjustments||[]).concat(replacements),hand:hand.map(c=>c.name),seed,confidence:'low'});
+    const prefix='p'+player.id,h=source.historyCounters[index];lines.push(prefix+'life='+player.life,prefix+'landsplayed='+h.landsPlayedThisTurn);
+    const counters=[['poisonCounters','POISON'],['energyCounters','ENERGY'],['experienceCounters','EXPERIENCE'],['radCounters','RAD']].filter(([key])=>player[key]>0).map(([key,name])=>name+'='+player[key]);if(counters.length)lines.push(prefix+'counters='+counters.join(','));
+    if(player.ringTempts)lines.push(prefix+'numringtemptedyou='+player.ringTempts);
+    const mana=Object.entries(player.manaPool||{}).flatMap(([color,n])=>Array(n).fill(color)).join(' ');if(mana)lines.push(prefix+'manapool='+mana);
+    for(const zone of ZONES){const list=zone==='hand'?hand:(player[zone]||[]).filter(c=>!(zone==='commandZone'&&!c.isCommander&&!c.isCompanion));lines.push(prefix+(zone==='commandZone'?'command':zone)+'='+list.map(c=>cardText(source,c)).join(';'));}
+    lines.push(prefix+'library='+library.map(c=>cardText(source,{...c,ownerId:player.id,controllerId:player.id})).join(';'));
+    let sideId=1_800_000_000+index*1000;lines.push(prefix+'sideboard='+expand(side).map(name=>cardText(source,{id:sideId++,name,ownerId:player.id,controllerId:player.id})).join(';'));
+  }
+  const root={stateText:lines.join('\n')+'\n',seed,viewerId:Number(source.header.seat),names:state.players.map(p=>p.name),gameId:state.gameId,activePlayerId:Number(state.activePlayerId),priorityPlayerId:Number(state.priorityPlayerId),firstPriorityId:source.firstPriorityId,history:source.historyCounters,cardHistory:source.cardHistory,decks:adaptedDecks,stack:state.stack||[],spellHistory:source.spellHistory||[],tokens:state.players.flatMap(p=>ZONES.flatMap(z=>p[z]||[]).filter(c=>c.isToken&&c.name==='Thundertrap Trainer')),statuses:state.players.map(p=>({hasMonarch:!!p.hasMonarch,hasInitiative:!!p.hasInitiative,hasCitysBlessing:!!p.hasCitysBlessing,commandEffects:(p.commandZone||[]).filter(c=>!c.isCommander&&!c.isCompanion)}))};
+  const id=crypto.createHash('sha256').update(JSON.stringify({root,version:1})).digest('hex');
+  return{id,root,assumptions,hiddenHands:hands,libraries,sourceUrls:decks.map(d=>d.url),scenario:stressApplied?{kind:'targeted-interaction-stress',card:stressRequested,basis:'explicitly assumes one plausible interaction card from the fixed deck; not a probability sample'}:{kind:'deck-sampled-hidden-hand'}};
+}
+function auditRoot(source,actual){
+  const failures=[];
+  const same=(a,b,label)=>{if(JSON.stringify(a)!==JSON.stringify(b))failures.push(label);};
+  same(actual.players.length,source.baseline.players.length,'玩家数量');
+  same(Number(actual.turnNumber),Number(source.baseline.turnNumber),'回合数');same(String(actual.activePlayerId),String(source.baseline.activePlayerId),'主动玩家');same(String(actual.priorityPlayerId),String(source.baseline.priorityPlayerId),'优先权');
+  const phase=x=>({END_STEP:'END_OF_TURN',BEGIN_COMBAT:'COMBAT_BEGIN',DECLARE_ATTACKERS:'COMBAT_DECLARE_ATTACKERS',DECLARE_BLOCKERS:'COMBAT_DECLARE_BLOCKERS',END_COMBAT:'COMBAT_END'})[x]||x;
+  same(phase(actual.phase),phase(source.baseline.phase),'阶段');
+  same(actual.stack.map(s=>s.sourceCard.name),source.baseline.stack.map(s=>s.sourceCard.name),'堆叠顺序与牌面');
+  for(const [i,p] of source.baseline.players.entries()){
+    const q=actual.players[i];if(!q)continue;same(q.life,p.life,'生命 '+p.id);same(q.librarySize,p.librarySize,'牌库张数 '+p.id);same(q.handSize,p.handSize,'手牌张数 '+p.id);
+    const normPool=x=>Object.fromEntries(Object.entries(x||{}).filter(([,n])=>n>0).sort(([a],[b])=>a.localeCompare(b)));same(normPool(q.manaPool),normPool(p.manaPool),'法术力池 '+p.id);
+    same(q.drawnThisTurn,source.historyCounters[i].numDrawnThisTurn,'抓牌历史 '+p.id);same(q.landsPlayedThisTurn,source.historyCounters[i].landsPlayedThisTurn,'下地历史 '+p.id);
+    same(q.spellsCastThisTurn,source.historyCounters[i].spellsCastThisTurn,'施法历史 '+p.id);
+    for(const zone of ZONES){const original=p[zone]||[],restored=q[zone]||[];same(restored.length,original.length,zone+' 数量 '+p.id);
+      for(const c of original){if(c.name==='Hidden card'||c.faceDown)continue;const d=restored.find(x=>String(x.id)===String(c.id));if(!d){failures.push('缺少 '+c.name);continue;}
+        same(d.name,c.name,'牌面 '+c.name);
+        if(zone==='battlefield'){
+          same(d.tapped,!!c.tapped,'横置 '+c.name);same(d.hasSummoningSickness,!!c.hasSummoningSickness,'召唤失调 '+c.name);same(d.damage,c.damage||0,'伤害 '+c.name);
+          const norm=x=>Object.fromEntries(Object.entries(x||{}).map(([k,v])=>[({'+1/+1':'P1P1','-1/-1':'M1M1'})[k]||k.toUpperCase(),v]).sort(([a],[b])=>a.localeCompare(b)));
+          same(norm(d.counters),norm(c.counters),'指示物 '+c.name);
+          if(c.types?.includes('Creature')){same(d.power,c.power,'力量 '+c.name);same(d.toughness,c.toughness,'防御力 '+c.name);}
+          const keyword=x=>x.toLowerCase().replace(/[^a-z0-9]/g,'');for(const k of c.keywords||[])if(!(d.keywords||[]).some(actual=>keyword(actual)===keyword(k)))failures.push('异能 '+c.name+' '+k);
+          for(const mark of c.chosenMarks||[])if(mark.kind==='NAME')same(d.chosenMarks?.find(m=>m.kind==='NAME')?.value,mark.value,'命名 '+c.name);
+        }
+      }
+    }
+    same(!!q.hasMonarch,!!p.hasMonarch,'君主 '+p.id);same(!!q.hasInitiative,!!p.hasInitiative,'主动权 '+p.id);
+  }
+  if(failures.length)reject('Forge 局面恢复核对失败：'+failures.join('；'));return{passed:true,checks:'visible zones, life, card identities, tap, damage, counters, power/toughness, naming and restored turn history'};
+}
+module.exports={buildWorld,auditRoot,cardText,random,shuffle};

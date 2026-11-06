@@ -1,0 +1,243 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Endstep Codex Branch v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "format",
+    "version",
+    "engine",
+    "source",
+    "title",
+    "summary",
+    "assumptions",
+    "steps",
+    "stop"
+  ],
+  "properties": {
+    "format": {
+      "const": "endstep-branch"
+    },
+    "version": {
+      "const": 1
+    },
+    "engine": {
+      "const": "local-supported-v1"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sha256",
+        "anchorLine"
+      ],
+      "properties": {
+        "sha256": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "anchorLine": {
+          "type": "integer",
+          "minimum": 2
+        }
+      }
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 6000
+    },
+    "assumptions": {
+      "type": "array",
+      "maxItems": 40,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 2000
+      }
+    },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 120,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "action",
+          "label",
+          "explanation"
+        ],
+        "properties": {
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "explanation": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 5000
+          },
+          "durationMs": {
+            "type": "integer",
+            "minimum": 700,
+            "maximum": 15000
+          },
+          "action": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "type"
+                ],
+                "properties": {
+                  "type": {
+                    "enum": [
+                      "advance_main",
+                      "resolve_top"
+                    ]
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "type",
+                  "cardId"
+                ],
+                "properties": {
+                  "type": {
+                    "enum": [
+                      "play_land",
+                      "activate_fetch"
+                    ]
+                  },
+                  "cardId": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "type",
+                  "landId"
+                ],
+                "properties": {
+                  "type": {
+                    "const": "resolve_fetch"
+                  },
+                  "landId": {
+                    "type": "integer",
+                    "minimum": 0
+                  }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "type",
+                  "cardId",
+                  "payment"
+                ],
+                "properties": {
+                  "type": {
+                    "const": "cast"
+                  },
+                  "cardId": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "payment": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "landId",
+                        "color"
+                      ],
+                      "properties": {
+                        "landId": {
+                          "type": "integer",
+                          "minimum": 0
+                        },
+                        "color": {
+                          "enum": [
+                            "W",
+                            "U",
+                            "B",
+                            "R",
+                            "G",
+                            "C"
+                          ]
+                        }
+                      }
+                    }
+                  },
+                  "modes": {
+                    "type": "array",
+                    "uniqueItems": true,
+                    "minItems": 1,
+                    "maxItems": 2,
+                    "items": {
+                      "enum": [
+                        "draw_two",
+                        "destroy_artifact",
+                        "damage_creature"
+                      ]
+                    }
+                  },
+                  "drawPlayerId": {
+                    "type": "string"
+                  },
+                  "artifactId": {
+                    "type": "integer"
+                  },
+                  "creatureId": {
+                    "type": "integer"
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "stop": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reason",
+        "detail"
+      ],
+      "properties": {
+        "reason": {
+          "enum": [
+            "unknown_draw",
+            "unknown_response",
+            "complete_line",
+            "assumed_line"
+          ]
+        },
+        "detail": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 3000
+        }
+      }
+    }
+  }
+}

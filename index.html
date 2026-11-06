@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Endstep · 对局档案</title>
+  <meta name="color-scheme" content="light">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="masthead">
+    <a class="wordmark" href="#" id="home" aria-label="返回档案首页"><svg width="25" height="30" viewBox="0 0 25 30" fill="none" aria-hidden="true"><path d="M3 2h18v26H3zM7 7h10M7 12h10M7 17h6M7 22h10" stroke="currentColor" stroke-width="1.5"/><path d="M1 5v24h18" stroke="currentColor"/></svg><span>ENDSTEP<span class="wordmark-sub">对局档案</span></span></a>
+    <nav><span id="codex-connection" class="connection-status">连接 Codex…</span><button id="fullscreen" class="text-button">全屏 ⛶</button><button id="help" class="text-button">阅读说明 <span>↗</span></button><button class="import-button" id="open">导入回放 <span>＋</span></button></nav>
+    <input id="file" type="file" accept=".esreplay,.jsonl,.ndjson" hidden>
+  </header>
+  <main id="landing" class="landing">
+    <div class="landing-copy"><p class="eyebrow">本地工具 / ENDSTEP REPLAY</p><h1>Endstep<br>复盘工作台</h1><p class="intro">整盘复盘，描述新的打法。<br>选择操作，让 Codex 推演另一条路线。</p><button class="primary" id="landing-open">选择 .esreplay 文件 <span>↗</span></button><p class="local-note"><span class="local-dot"></span>本地应用 · 使用已登录的 Codex</p></div>
+    <div class="folio" aria-hidden="true"><span class="folio-corner">.ESREPLAY → JSONL</span><div class="card-illustration"><div class="line-card back"></div><div class="line-card middle"></div><div class="line-card front"><span>ENDSTEP REPLAY</span><svg viewBox="0 0 150 150"><circle cx="75" cy="75" r="48"/><circle cx="75" cy="75" r="33"/><path d="M27 75h96M75 27v96M41 41l68 68M41 109l68-68"/><path d="M75 14l7 16-7-3-7 3zM75 136l7-16-7 3-7-3z" class="fill"/></svg><i>回放 · 战报 · 原始记录</i></div></div><div class="folio-bottom"><span>01 — 导入</span><span>02 — 阅读</span><span>03 — 导出</span></div></div>
+    <div class="landing-footer"><span>适用于 Endstep Replay · 格式 v1</span><span>分局阅读 / 局面快照 / 战报导出</span></div>
+  </main>
+  <section id="workspace" hidden>
+    <div class="match-head"><div><p id="match-meta" class="eyebrow"></p><h1 id="match-title"></h1><p id="match-sub" class="match-sub"></p></div><div class="match-score"><span class="score-caption">局分</span><div id="score"></div></div></div>
+    <div class="view-switch" aria-label="阅读方式"><button id="view-codex" aria-pressed="false">整盘复盘</button><button id="view-report" class="active" aria-pressed="true">中文战报</button><button id="view-jsonl" aria-pressed="false">原始 JSONL</button></div>
+    <div class="toolbar" id="report-toolbar"><div id="games" class="games" aria-label="选择对局"></div><div class="reader-tools"><label class="search"><span aria-hidden="true">⌕</span><input id="search" placeholder="查找牌名、操作…" aria-label="搜索战报"><kbd>/</kbd></label><button id="detail" class="text-button" aria-pressed="false">精简记录</button><div class="export-wrap"><button id="export" class="text-button" aria-expanded="false">导出战报 ↓</button><div id="export-menu" class="export-menu" hidden><button data-export="html">交互战报 .html</button><button data-export="md">中文战报 .md</button><button data-export="txt">纯文本 .txt</button><button data-export="jsonl">原始记录 .jsonl</button><button data-export="json">结构化战报 .json</button></div></div></div></div>
+    <div id="warnings" class="warnings" hidden></div>
+    <div class="reading-grid" id="report-view"><aside class="turn-rail"><div class="rail-heading">回合索引 <span id="turn-count"></span></div><nav id="turns" aria-label="回合导航"></nav><section class="rail-branch" hidden aria-labelledby="turn-branch-heading"><h3 id="turn-branch-heading" tabindex="-1">从此回合分支</h3><div id="turn-branch-options" class="turn-branch-options"></div><div class="rail-branch-footer"><p id="rail-branch-selection" aria-live="polite">尚未选择分支起点</p><button id="rail-branch-continue" class="text-button" disabled>交给 Codex →</button></div></section></aside><article class="reading"><div class="reading-heading"><div><p class="eyebrow" id="turn-kicker"></p><h2 id="turn-title"></h2></div><div class="turn-arrows"><button id="prev" aria-label="上一回合">←</button><button id="next" aria-label="下一回合">→</button></div></div><div id="search-note" class="search-note" hidden></div><div id="events"></div><div class="end-mark"><span></span> END OF RECORD <span></span></div></article><aside class="board"><div class="board-top"><h3>局面笔记</h3><button id="reset-state" class="text-button" hidden>回到回合末 ↶</button></div><p id="snapshot-caption" class="snapshot-caption"></p><div id="board-state"></div><details class="method"><summary>这份记录如何阅读</summary><p>点击事件，可查看在该事件之前最近收到的快照。默认显示本回合末最近快照；网络事件与快照分开发送，时间可能略有间隔。</p><p>未知牌保持未知；移区不直接等同于抓牌或消灭。未来出现的牌不会补进过去的手牌。</p><p>点击已知牌名可查看文件中的英文牌面文字。</p></details></aside></div>
+    <section id="jsonl-view" class="jsonl-view" hidden><div class="jsonl-toolbar"><div><h2>原始 JSONL</h2><p>解压后的原始记录，保留行序与数值，不改写数据。</p></div><button id="save-jsonl" class="import-button">保存 .jsonl ↓</button></div><div class="jsonl-controls"><label>记录类型 <select id="raw-kind" aria-label="筛选原始记录类型"><option value="">全部记录</option><option value="header">文件头</option><option value="chapter">chapter · 对局边界</option><option value="event">event · 游戏事件</option><option value="action">action · 玩家操作</option><option value="key">key · 完整快照</option><option value="diff">diff · 状态补丁</option></select></label><input id="raw-search" placeholder="搜索原始行…" aria-label="搜索原始 JSONL"><span id="raw-count"></span></div><textarea id="raw-text" readonly spellcheck="false" aria-label="原始 JSONL 内容" wrap="off"></textarea><p class="raw-footnote">每行是一个 JSON 对象。筛选只影响预览；保存始终导出完整原始文件。</p></section>
+    <section id="codex-view" class="codex-view" hidden>
+      <section id="studio-panel" class="studio-panel">
+        <header class="studio-heading"><div><h2>整盘复盘</h2><p>先看整盘决策，再选择一个节点重演。</p><span id="studio-model" class="studio-model">模型：读取配置中…</span></div><button id="studio-review" class="primary">生成整盘复盘 ↗</button></header>
+        <div id="studio-job" class="studio-job" hidden><div><span id="studio-job-label"></span><p id="studio-job-message" role="status"></p></div><button id="studio-cancel" class="text-button">停止</button></div>
+        <div id="studio-game-stages" class="studio-game-stages"></div>
+        <section id="studio-overview" class="studio-overview" hidden></section>
+        <div class="review-workspace"><aside class="review-node-rail"><h3>关键节点</h3><div id="review-nodes"><p class="step-description">生成复盘后，按局查看关键决策。也可以在中文战报中点击操作开分支。</p></div></aside><article id="review-node" class="review-node"><div class="review-placeholder"><h3>选择复盘节点</h3><p>复盘会检查法术力基础、费用与支付顺序，并给出具体的新打法。选择节点后，用自然语言表达想改变的打法，由 AI 提炼并重演。</p></div></article></div>
+        <section id="studio-result" class="studio-result" hidden></section>
+      </section>
+      <details id="manual-workflow" class="manual-workflow" hidden><summary>手动文件交接（兼容旧工作流）</summary>
+      <div class="codex-intro"><div><h2>重演另一套打法</h2><p>在回合索引选定起点，交给 Codex 推演，再生成分支回放。</p></div><span class="workflow-label">文件交接 · 无需 API 密钥</span></div>
+      <div class="codex-columns">
+        <section class="workflow-step"><span class="step-number">01</span><h3>交给 Codex</h3><div class="branch-selection-card"><span>分支起点</span><p id="branch-selection" aria-live="polite">尚未选择分支起点</p><button id="branch-locate" class="text-button">去回合索引选择 ↗</button></div><label for="branch-focus">复盘重点</label><textarea id="branch-focus" rows="3">从选定操作前推演双方完整后续，对手按新局面重新决策。所有牌名保留完整英文。允许 Codex 假设未知牌和牌序，先固定假设并全程标注；缺少执行能力时列出阻塞项。</textarea><button id="handoff-download" class="primary">下载 Codex 交接文件 ↓</button><button id="prompt-copy" class="text-button">复制交接提示词 ↗</button><details class="handoff-guide"><summary>如何转交给 Codex</summary><p>1. 在回合索引选择操作，下载 codex-handoff.json。<br>2. 在 Codex 对话中附上该文件，或告诉 Codex 文件的完整本地路径。<br>3. 点击“复制交接提示词”，粘贴到同一对话并发送。<br>4. 将返回的 branch.json 导入右侧面板。</p><p>复盘、步骤和日志都使用完整英文牌名，例如 Tamiyo, Inquisitive Student、Flame of Anor、Disruptor Flute；不使用译名或昵称。</p><textarea id="handoff-prompt" readonly rows="7" aria-label="交接提示词"></textarea><p>目标是双方完整后续。未知牌和牌序由 Codex 合理假设，清单列出依据，受影响步骤标注假设编号。当前本地执行器只支持有限片段，不能注入假设牌或执行未知抽牌。文件包含原回放及手牌信息；此页面不会自动发送给 Codex。</p></details></section>
+        <section class="workflow-step"><span class="step-number">02</span><h3>导入推荐打法</h3><p class="step-description">把 Codex 生成的 branch.json 拖入、选择文件，或粘贴完整 JSON。</p><button id="branch-open" class="import-button">选择 branch.json ＋</button><input id="branch-file" type="file" accept=".json" hidden><textarea id="branch-input" rows="9" spellcheck="false" aria-label="Codex 分支 JSON" placeholder='{"format":"endstep-branch","version":1,...}'></textarea><button id="branch-check" class="primary">检查并预览 →</button><p id="branch-status" class="branch-status" role="status">等待导入推荐打法。</p><button id="branch-repair" class="text-button" hidden>复制错误，交给 Codex 修正 ↗</button></section>
+        <section class="workflow-step"><span class="step-number">03</span><h3>生成 Replay</h3><div id="branch-preview" class="branch-preview"><p class="step-description">检查后会在这里列出推荐步骤与停止原因。</p></div><button id="branch-export" class="primary" disabled>生成分支 .esreplay ↓</button><button id="branch-local-preview" class="text-button" disabled>在本工具中查看分支 →</button><p class="branch-limit">动作由有限规则执行器执行，AI 不能直接改局面。当前支持范围随交接文件提供，不支持的规则会停止；还不能模拟任意牌表的完整对局。原局后续会截断。</p><a class="text-button endstep-link" href="https://endstep.cc/replay/local" target="_blank" rel="noreferrer">在 Endstep 打开本地回放 ↗</a></section>
+      </div>
+      </details>
+    </section>
+  </section>
+  <div id="drop" class="drop-overlay" hidden><div><span>↓</span><h2>把回放放在这里</h2><p>.esreplay / .jsonl</p></div></div>
+  <div id="toast" class="toast" role="status" hidden></div>
+  <dialog id="help-dialog"><button class="dialog-close" data-close aria-label="关闭">×</button><h2>阅读说明</h2><p>导入 Endstep 的 .esreplay 文件，即可按局、回合、阶段阅读中文战报。支持拖入文件，也支持未压缩的 JSONL。切换「原始 JSONL」可直接查看、筛选或保存完整原始记录。</p><dl><dt>事件与操作</dt><dd>战报只根据游戏事件生成。玩家点击、自动支付和取消操作不作为已成功执行的事实。</dd><dt>施放与结算</dt><dd>施放不代表结算；离开堆叠不直接代表被反击。触发异能与来源咒语分别记录。</dd><dt>隐藏信息</dt><dd>只呈现录制视角能看到的信息。对手的未知手牌不会被补全；牌库移入手牌不一律叫作抓牌。</dd><dt>语言与兼容</dt><dd>牌名使用文件中的英文名；常见操作翻译为中文。无法可靠翻译的效应保留原文，未知事件也会保留。当前验证版本为 Endstep Replay v1。</dd><dt>快捷键</dt><dd>← → 切换回合，/ 搜索。导出的 HTML 可离线打开，包含整场战报及已记录的手牌信息。</dd></dl><p class="source-note">术语参考 <a href="https://magic.wizards.com/en/rules" target="_blank" rel="noreferrer">万智牌官方规则 ↗</a>（121.1、113.7a、701.6）。本工具整理记录，不模拟规则或评判最优操作。</p></dialog>
+  <dialog id="card-dialog"><button class="dialog-close" data-close aria-label="关闭">×</button><p class="eyebrow">CARD REFERENCE · 回放牌面</p><h2 id="card-title"></h2><p id="card-meta"></p><div id="card-oracle"></div><p class="source-note">文字来自此回放文件，可能与最新 Oracle 不同。此页仅为牌面参考。</p></dialog>
+  <script src="replay.js"></script>
+  <script src="engine.js"></script>
+  <script src="branch.js"></script>
+  <script src="app.js"></script>
+  <script src="studio.js"></script>
+</body>
+</html>
