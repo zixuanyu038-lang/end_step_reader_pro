@@ -4,6 +4,21 @@
 
 当前是 **Windows x64 实验预览版**，由个人开发，与 Endstep 官方无隶属关系。模型调用遵循已登录 Codex 账户的额度与使用条件。
 
+## 仓库怎么读
+
+完整的逐文件说明见 **[代码导览](code-guide.md)**：覆盖发布目录中的每个文件，解释主要函数、类、代码块、调用关系和修改入口。
+
+| 部分 | 主要文件 | 做什么 |
+| --- | --- | --- |
+| 页面与战报 | `index.html`、`style.css`、`app.js`、`replay.js` | 导入记录，还原局面，阅读和导出 |
+| 复盘交互与任务 | `studio.js`、`studio-server.js`、`codex-client.js` | 选择节点、提交任务、连接本机 Codex |
+| 牌表与根局面 | `match-decks.js`、`deck-service.js`、`search-source.js`、`hidden-worlds.js` | 还原组成，固定换备，构造并审计隐藏世界 |
+| 搜索与判断 | `search-review.js`、`search-branch.js`、`tree-search.js`、`winning-lines.js` | 调度搜索，筛胜局，由 AI 判断教学价值 |
+| 规则与回放 | `forge-client.js`、`forge/EngineWorker.java`、`forge-replay.js` | 执行规则，将认可轨迹写成 Endstep 回放 |
+| 兼容、工具与测试 | `branch*`、`engine.js`、`scenario.js`、`forge/`、`tests/` 等 | 保留旧协议，安装运行时，验证格式与执行边界 |
+
+推荐阅读顺序：`studio-server.js → search-review.js → tree-search.js → forge/EngineWorker.java → winning-lines.js → forge-replay.js`。旧手动分支与账本已在导览中单独标出。
+
 ## Windows 启动
 
 需要 Node.js 22+ 和已登录的 Codex。无需安装 npm 运行依赖、无需额外填写 API Key；模型与额度沿用本机 Codex 配置，页面显示实际模型和推理强度。
