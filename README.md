@@ -1,4 +1,4 @@
-# Endstep Studio
+# Endstep_READER_pro
 
 在 Codex 中使用的万智牌复盘工作台：先通看整盘找节点，用 Forge 搜索比较，再根据真实执行证据写复盘。选择节点，用中文描述新打法，即可生成含隐藏信息假设的 Endstep 分支。所有牌名保留完整英文。
 
