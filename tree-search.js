@@ -50,12 +50,27 @@ function originalSelection(source,actions){
 class Node {
   constructor({path=[],action=null,parent=null,state=null,actions=[]}={}){Object.assign(this,{path,action,parent,state,actions});this.children=[];this.visits=0;this.total=0;this.reward=0;this.rejected=[];}
 }
-async function search({client,source,worlds,signal,budget={},onProgress=()=>{}}){
+async function inspectSearchWorlds({client,source,worlds,signal}){
+  const checked=[];
+  for(const world of worlds){
+    const initial=await client.request({command:'expand',root:world.root,path:[],includeTrace:false,maxChoices:2000,maxSteps:4000},{signal});
+    if(initial.stopReason!=='decision'||!initial.actions.length)throw Error('Forge 未恢复到有可选动作的优先权节点。');
+    const audit=auditRoot(source,initial.state);
+    for(const [i,p] of source.baseline.players.entries()){
+      const top=source.knownTop?.[String(p.id)]||[];
+      if(top.some((id,n)=>String(initial.rootLibraries[i][n]?.id)!==String(id)))throw Error('Forge 牌库顶顺序与已知信息不一致。');
+    }
+    checked.push({initial,audit});
+  }
+  return checked;
+}
+async function search({client,source,worlds,signal,budget={},checkedWorlds,onProgress=()=>{}}){
   const startedAt=Date.now();
   const settings={iterations:32,maxDepth:7,width:7,horizonTurns:100,maxChoices:2000,maxSteps:4000,...budget};
   settings.iterations=Math.max(8,Math.min(120,settings.iterations));settings.width=Math.max(2,Math.min(12,settings.width));settings.maxDepth=Math.max(1,Math.min(16,settings.maxDepth));
   const rootActor=Number(source.baseline.priorityPlayerId),viewer=Number(source.header.seat),runs=[],totals=new Map(),rootAudits=[];
   let simulated=0,expanded=0;const winningCandidates=[],winningKeys=new Set();
+  checkedWorlds??=await inspectSearchWorlds({client,source,worlds,signal});
   for(const [worldIndex,world] of worlds.entries()){
     const worldStartedAt=Date.now();
     if(signal?.aborted)throw Error('任务已取消。');
@@ -66,11 +81,7 @@ async function search({client,source,worlds,signal,budget={},onProgress=()=>{}})
       if(command==='simulate'&&!includeTrace)simulated++;
       cache.set(key,result);return result;
     };
-    const initial=await request('expand',[]);rootAudits.push(auditRoot(source,initial.state));
-    for(const [i,p] of source.baseline.players.entries()){
-      const top=source.knownTop?.[String(p.id)]||[];
-      if(top.some((id,n)=>String(initial.rootLibraries[i][n]?.id)!==String(id)))throw Error('Forge 牌库顶顺序与已知信息不一致。');
-    }
+    const {initial,audit}=checkedWorlds[worldIndex];rootAudits.push(audit);
     const original=originalSelection(source,initial.actions);
     const root=new Node({state:initial.state,actions:rankActions(initial.actions,initial.state,{observedCardId:original.action?.cardId,width:settings.width})});
     if(original.matched&&!root.actions.some(a=>a.key===original.key)){root.actions.pop();root.actions.push(original.action);}
@@ -135,4 +146,4 @@ async function search({client,source,worlds,signal,budget={},onProgress=()=>{}})
     winningCandidates,representative:{worldId:representativeWorld.id,scenario:representativeWorld.scenario,path:chosenPath.map(compact),...representative},
     limitations:['启发式材料评分不是胜率','情景集可能包含明确构造的交互压力测试，均值不代表真实概率','有限候选、深度、世界及预算，不能证明最优','法术力支付、战斗与部分选择由 Forge 内置策略决定','各隐藏世界分别搜索，尚未实现完整信息集搜索；深层策略可能存在 determinization bias','代表轨迹只是一个已固定假设世界中的真实引擎后续']};
 }
-module.exports={search,rankActions,deduplicate,originalSelection,compact};
+module.exports={search,inspectSearchWorlds,rankActions,deduplicate,originalSelection,compact};

@@ -123,7 +123,31 @@ function validateUpload(deck,player,first,recorded){
     if(total(all)!==known.reduce((n,c)=>n+c.count,0)||known.some(c=>all.get(c.name)!==c.count))throw Error('上传的主备牌组成与回放中完整记录的牌池不一致。');
   }
 }
-async function prepareMatchDecks({model,deckService,forge,ask,signal,deckPreferences=null,onProgress=()=>{}}){
+function readManualSideboard(value){
+  if(value==null)return [];
+  if(!Array.isArray(value)||value.length>18)throw Error('手动换备设置无效。');
+  const keys=new Set();
+  return value.map(entry=>{
+    if(!entry||!Number.isInteger(entry.game)||entry.game<2||!['0','1'].includes(entry.playerId))throw Error('请选择有效的换备局数和玩家。');
+    const key=entry.game+':'+entry.playerId;
+    if(keys.has(key))throw Error('同一局同一玩家只能有一份换备设置。');
+    keys.add(key);
+    function parse(text){
+      if(typeof text!=='string'||text.length>4000)throw Error('请逐行填写换备数量和完整英文牌名。');
+      const names=[];
+      for(const line of text.split(/\r?\n/).map(line=>line.trim()).filter(Boolean)){
+        const match=/^([1-9]\d?)\s+(.+)$/.exec(line);
+        if(!match||Number(match[1])+names.length>15)throw Error('换备每行格式如 2 Pyroblast，每边最多 15 张。');
+        names.push(...Array(Number(match[1])).fill(canonicalName(match[2])));
+      }
+      return counts(names);
+    }
+    const ins=parse(entry.inText),outs=parse(entry.outText);
+    if(ins.reduce((n,c)=>n+c.count,0)!==outs.reduce((n,c)=>n+c.count,0))throw Error('手动换入和换出的总张数必须相同。');
+    return {game:entry.game,playerId:entry.playerId,ins,outs,manual:true,reason:'玩家指定换备',uncertainties:[]};
+  });
+}
+async function prepareMatchDecks({model,deckService,forge,ask,signal,deckPreferences=null,manualSideboard=[],onProgress=()=>{}}){
   const scanned=scanMatch(model.sourceText),bases=[];
   const first=[...scanned.games.values()][0];
   if(!first)throw Error('回放没有可用于核对起始牌表的对局。');
@@ -159,7 +183,7 @@ async function prepareMatchDecks({model,deckService,forge,ask,signal,deckPrefere
     const size=first.initialDeckSizes[String(i)]||base.main.reduce((n,c)=>n+c.count,0);
     return fixDeck(coverGlobalFacts(base,matchObserved,catalog,size),firstObserved,size,catalog,matchObserved);
   });
-  const later=[...scanned.games.values()].filter(g=>g.game>first.game);let plans=[];
+  const later=[...scanned.games.values()].filter(g=>g.game>first.game);
   function applyPlan(base,plan){
     const main=mapCounts(base.main),side=mapCounts(base.sideboard);
     if(plan.ins.reduce((n,c)=>n+c.count,0)!==plan.outs.reduce((n,c)=>n+c.count,0))throw Error('换入换出数量不同。');
@@ -172,33 +196,45 @@ async function prepareMatchDecks({model,deckService,forge,ask,signal,deckPrefere
     const list=m=>[...m].filter(([,n])=>n>0).map(([name,count])=>({name,count}));
     return{...base,main:list(main),sideboard:list(side),sideboardPlan:plan,fixedForGame:true,hypothesisId:hash({main:[...main],side:[...side],source:base.sha256,plan})};
   }
-  if(later.length){
+  function checkPlan(game,id,plan){
+    const deck=applyPlan(fixedBases[Number(id)],plan);
+    if(plan.manual||!scanned.recorded.has(game.game+':'+id)){
+      const main=mapCounts(deck.main),minimum=counts([...(game.players.get(id)?.values()||[])].map(c=>c.name));
+      for(const card of minimum)if((main.get(card.name)||0)<card.count)throw Error('第 '+game.game+' 局换备后没有足够的已公开牌 '+card.name);
+    }
+  }
+  for(const plan of manualSideboard){
+    const game=later.find(g=>g.game===plan.game);
+    if(!game)throw Error('回放中没有第 '+plan.game+' 局的换备节点。');
+    try{checkPlan(game,plan.playerId,plan);}
+    catch(error){throw Error('第 '+plan.game+' 局 '+label(plan.playerId)+'手动换备 · '+error.message);}
+  }
+  const pending=later.flatMap(g=>['0','1'].filter(id=>!manualSideboard.some(p=>p.game===g.game&&p.playerId===id)).map(id=>({game:g.game,playerId:id})));
+  let plans=[...manualSideboard];
+  if(pending.length){
     let repair='';
     for(let attempt=0;attempt<2;attempt++){
       onProgress('正在结合双方完整牌表推理换备方案…');
       const sources=allowWeb?'可使用联网搜索查找公开换备指南。使用网页时在 reason 中列出原始链接，区分资料与推理。':'根据给出的牌表与已公开牌自行推理。';
-      const response=await ask(`你是万智牌比赛换备教练。根据双方固定的完整主牌和备牌，推理后续各局的换备。${sources}不得编造引用。所有换入/换出均相对于提供的基准主备牌，保留主牌张数，不能创造牌或超出实体数量。结合对局类型、先后手、每局已公开牌的最低数量，给每个后续game的每个playerId一份方案。swaps每项为同数量的成对替换：inName从原备牌进入、outName从原主牌离开、count为两者相同数量；可拆成多项，允许不换牌的空数组。这样接口保证总数相等。不能换入不在原备牌中的牌，不能把本次刚换出的牌算成可换入来源。对手方案必须容纳该局公开牌。录制侧实际换备另有精确记录时，你仍给建议对照，程序会保留实际牌表作事实。两份完整牌表允许用于匹配分析，不能声称对手知道我们的实际换备或手牌。未知灵活位明确是不确定假设。\n`+JSON.stringify({players:scanned.header.players,baseDecks:fixedBases.map((d,i)=>({playerId:String(i),main:d.main,sideboard:d.sideboard,source:d.basis})),games:later.map(g=>({game:g.game,startingPlayerId:g.startingPlayerId,publicMinimums:['0','1'].map(id=>({playerId:id,cards:counts([...(g.players.get(id)?.values()||[])].map(c=>c.name))})),recordedViewerDeck:scanned.recorded.get(g.game+':'+String(scanned.header.seat))||null}))})+repair,Schema.sideboarding,{webSearch:allowWeb});
+      const response=await ask(`你是万智牌比赛换备教练。根据双方固定的完整主牌和备牌，推理后续各局的换备。${sources}不得编造引用。所有换入/换出均相对于提供的基准主备牌，保留主牌张数，不能创造牌或超出实体数量。只对 pending 中每个 game 和 playerId 各给一份方案。manualSideboard 是已经锁定的玩家设置。swaps 每项为同数量的替换，从原备牌换入、从原主牌换出，允许不换牌的空数组。方案必须容纳该局公开牌。已有实际记录时仍给建议对照。未知灵活位明确是不确定假设。\n`+JSON.stringify({pending,manualSideboard,players:scanned.header.players,baseDecks:fixedBases.map((d,i)=>({playerId:String(i),main:d.main,sideboard:d.sideboard,source:d.basis})),games:later.map(g=>({game:g.game,startingPlayerId:g.startingPlayerId,publicMinimums:['0','1'].map(id=>({playerId:id,cards:counts([...(g.players.get(id)?.values()||[])].map(c=>c.name))})),recordedViewerDeck:scanned.recorded.get(g.game+':'+String(scanned.header.seat))||null}))})+repair,Schema.sideboarding,{webSearch:allowWeb});
       validate(response,Schema.sideboarding);
       response.plans=response.plans.map(plan=>({...plan,ins:counts(plan.swaps.flatMap(s=>Array(s.count).fill(s.inName))),outs:counts(plan.swaps.flatMap(s=>Array(s.count).fill(s.outName)))}));
       try{
-        for(const g of later)for(const id of ['0','1']){
-          const matches=response.plans.filter(p=>p.game===g.game&&p.playerId===id);if(matches.length!==1)throw Error('后续局缺少唯一的换备方案。');
-          const deck=applyPlan(fixedBases[Number(id)],matches[0]);
-          if(!scanned.recorded.has(g.game+':'+id)){
-            const main=mapCounts(deck.main),minimum=counts([...(g.players.get(id)?.values()||[])].map(c=>c.name));
-            for(const c of minimum)if((main.get(c.name)||0)<c.count)throw Error('第 '+g.game+' 局换备后没有足够的已公开牌 '+c.name);
-          }
+        for(const {game,playerId} of pending){
+          const matches=response.plans.filter(p=>p.game===game&&p.playerId===playerId);if(matches.length!==1)throw Error('后续局缺少唯一的换备方案。');
+          checkPlan(later.find(g=>g.game===game),playerId,matches[0]);
+          plans.push(matches[0]);
         }
-        plans=response.plans;break;
-      }catch(error){repair='\n上次换备核对失败：'+error.message+'。请修正完整方案。';if(attempt===1)throw error;}
+        break;
+      }catch(error){plans=[...manualSideboard];repair='\n上次换备核对失败：'+error.message+'。请修正完整方案。';if(attempt===1)throw error;}
     }
   }
   const byGame={};
   for(const g of scanned.games.values())byGame[g.game]=['0','1'].map((id,i)=>{
     const actual=scanned.recorded.get(g.game+':'+id),plan=plans.find(p=>p.game===g.game&&p.playerId===id);
-    if(actual)return{...fixDeck(actual,counts([...(g.players.get(id)?.values()||[])].map(c=>c.name)),g.initialDeckSizes[id],catalog),recommendedSideboardPlan:plan||null};
+    if(actual&&!plan?.manual)return{...fixDeck(actual,counts([...(g.players.get(id)?.values()||[])].map(c=>c.name)),g.initialDeckSizes[id],catalog),recommendedSideboardPlan:plan||null};
     return plan?applyPlan(fixedBases[i],plan):fixedBases[i];
   });
-  return{byGame,catalog,bases:fixedBases,sideboardPlans:plans,scope:scanned.scope,globalObserved:scanned.global};
+  return{byGame,catalog,bases:fixedBases,sideboardPlans:plans,manualSideboard,scope:scanned.scope,globalObserved:scanned.global};
 }
-module.exports={scanMatch,fixDeck,coverGlobalFacts,prepareMatchDecks};
+module.exports={scanMatch,fixDeck,coverGlobalFacts,prepareMatchDecks,readManualSideboard};

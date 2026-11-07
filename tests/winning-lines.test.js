@@ -6,16 +6,25 @@ const source=()=>({header:{seat:1},baseline:initial,game:1,anchor:{line:5},rows:
 const record=()=>({source:source(),node:{sourceLine:6,question:'Test decision'},worlds:[{id:'world',root:{seed:1,intent:{goals:[]}},hiddenHands:[]}],result:{winningCandidates:[{id:'win',worldId:'world',path:[action('candidate',3)],terminal:true,winnerId:'1',turn:8,executed:[],features:[]}]}});
 test('fast MCTS uses normalized terminal rewards, caches duplicate evaluations and collects unique wins',async()=>{
  const actions=[action('winning',2),action('losing',3),{kind:'pass',key:'pass:1',actorId:1,label:'Pass'}],calls=[];
- const client={async request(input){calls.push(input);if(input.command==='expand')return{state:{...initial},actions:input.path.length?[]:actions,rootLibraries:[]};const winner=input.path[0]?.key==='winning'?'1':'0';return{state:{...initial,status:'COMPLETE',winnerId:winner},stopReason:'game_over',evaluation:{score:winner==='1'?1000000:-1000000,features:[]},executed:[],intentStatus:{completed:0,total:0,blocked:[]},trace:[]};}};
+ const client={async request(input){calls.push(input);if(input.command==='expand')return{state:{...initial},actions:input.path.length?[]:actions,rootLibraries:[],stopReason:'decision'};const winner=input.path[0]?.key==='winning'?'1':'0';return{state:{...initial,status:'COMPLETE',winnerId:winner},stopReason:'game_over',evaluation:{score:winner==='1'?1000000:-1000000,features:[]},executed:[],intentStatus:{completed:0,total:0,blocked:[]},trace:[]};}};
  const result=await search({client,source:source(),worlds:[{id:'world',root:{seed:1}}],budget:{iterations:20,width:3}});
  assert.equal(result.best.action.key,'winning');assert.equal(result.simulated,3);assert.equal(result.winningCandidates.length,1);assert.ok(result.runs[0].tree.children.find(c=>c.action.key==='winning').visits>result.runs[0].tree.children.find(c=>c.action.key==='losing').visits);assert.ok(calls.every(c=>c.includeTrace===false));
 });
 test('no winning continuation means no AI call and no retained recommendation',async()=>{
  const r=record();r.result.winningCandidates=[];await selectWinningLines({records:[r],forge:{request(){throw Error('No engine call expected');}},ask(){throw Error('No AI call expected');}});assert.equal(r.result.quality.keep,false);
 });
+test('all fixed roots must pass restoration before any search iteration starts',async()=>{
+ const calls=[];
+ const client={async request(input){
+   calls.push(input);
+   return {state:initial,actions:[action('test',2)],rootLibraries:[],stopReason:input.root.seed===2?'choice_budget':'decision'};
+ }};
+ await assert.rejects(()=>search({client,source:source(),worlds:[{id:'ok',root:{seed:1}},{id:'bad',root:{seed:2}}]}),/未恢复/);
+ assert.deepEqual(calls.map(call=>[call.command,call.path,call.root.seed]),[['expand',[],1],['expand',[],2]]);
+});
 test('adversarial UCT explores the opponent refutation instead of assuming a cooperative win',async()=>{
  const aggressive=action('aggressive',2),safe=action('safe',3),refute={...action('refute',4),actorId:0},cooperate={...action('cooperate',5),actorId:0};
- const client={async request(input){const path=input.path,after=path.length>0;if(input.command==='expand')return{state:{...initial,priorityPlayerId:after?'0':'1'},actions:path.length>=2?[]:after?[refute,cooperate]:[aggressive,safe],rootLibraries:[]};const winner=path[0]?.key==='aggressive'&&path[1]?.key==='refute'?'0':'1';return{state:{...initial,status:'COMPLETE',winnerId:winner},stopReason:'game_over',evaluation:{score:winner==='1'?1000000:-1000000,features:[]},executed:[],intentStatus:{completed:0,total:0,blocked:[]},trace:[]};}};
+ const client={async request(input){const path=input.path,after=path.length>0;if(input.command==='expand')return{state:{...initial,priorityPlayerId:after?'0':'1'},actions:path.length>=2?[]:after?[refute,cooperate]:[aggressive,safe],rootLibraries:[],stopReason:'decision'};const winner=path[0]?.key==='aggressive'&&path[1]?.key==='refute'?'0':'1';return{state:{...initial,status:'COMPLETE',winnerId:winner},stopReason:'game_over',evaluation:{score:winner==='1'?1000000:-1000000,features:[]},executed:[],intentStatus:{completed:0,total:0,blocked:[]},trace:[]};}};
  const result=await search({client,source:source(),worlds:[{id:'world',root:{seed:1}}],budget:{iterations:80,width:3,maxDepth:3}});assert.equal(result.best.action.key,'safe');const trap=result.runs[0].tree.children.find(c=>c.action.key==='aggressive');assert.ok(trap.children.find(c=>c.action.key==='refute').visits>trap.children.find(c=>c.action.key==='cooperate').visits);
 });
 test('an accepted winner is replayed and compared against the selected root, not a different best action',async()=>{

@@ -4,9 +4,15 @@ const R=require('./replay'),P=require('./studio-protocol'),Scenario=require('./s
 const {CodexClient}=require('./codex-client');
 const {createModelQueue}=require('./model-queue');
 const {ForgeClient}=require('./forge-client'),{DeckService,DeckLookupError,readDeckPreferences}=require('./deck-service');
-const {runForgeReview,prepareOnly,shortlistOnly}=require('./search-review'),{runForgeBranch,runBranchQuality,inspectBranchStart}=require('./search-branch'),SearchProtocol=require('./search-protocol');
+const {runForgeReview,prepareOnly,shortlistOnly,publicDeckProfile}=require('./search-review'),{runForgeBranch,runBranchQuality,inspectBranchStart}=require('./search-branch'),SearchProtocol=require('./search-protocol');
+const {readManualSideboard}=require('./match-decks');
 const Source=require('./search-source');
 const {version}=require('./package.json');
+function readReviewOptions(value){
+  const {aiShortlist=true,searchMode='standard'}=value??{};
+  if(typeof aiShortlist!=='boolean'||!['standard','deep'].includes(searchMode))throw Error('请选择有效的整盘复盘设置。');
+  return {aiShortlist,searchMode};
+}
 function readStressCards(value){
   if(value==null)return [];
   if(!Array.isArray(value)||value.length>150||value.some(name=>typeof name!=='string'||name.trim().length>180||/[\r\n]/.test(name)))throw Error('请逐行填写对手未知手牌中的英文牌名。');
@@ -43,7 +49,7 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
     const unchecked=job.result?.downloadUrl&&!job.result?.quality?.keep;
     let result=unchecked?{quality:{keep:false,reason:'旧测试分支尚未经过胜局与AI二筛，已停止提供下载。'}}:job.result;
     if(job.status==='complete'&&result?.review&&result.reviewVersion!=='forge-search-v2-wins')result={...result,review:undefined,evidence:undefined};
-    return{id:job.id,replayId:job.replayId,type:job.type,sourceLine:job.sourceLine,parentJobId:job.parentJobId||null,intent:job.intent||'',stressCards:job.stressCards||[],status:job.status,phase:job.phase,message:unchecked?'旧测试分支尚未经过胜局与AI二筛，已停止提供下载。':job.message,events:job.events,createdAt:job.createdAt,result:result||null,error:job.error||null,errorCode:job.errorCode||null};
+    return{id:job.id,replayId:job.replayId,type:job.type,sourceLine:job.sourceLine,parentJobId:job.parentJobId||null,intent:job.intent||'',stressCards:job.stressCards||[],reviewOptions:job.reviewOptions,status:job.status,phase:job.phase,message:unchecked?'旧测试分支尚未经过胜局与AI二筛，已停止提供下载。':job.message,events:job.events,createdAt:job.createdAt,result:result||null,error:job.error||null,errorCode:job.errorCode||null};
   }
   async function save(job){const contents=JSON.stringify(snapshot(job),null,2);job.savePromise=(job.savePromise||Promise.resolve()).catch(()=>{}).then(async()=>{await fs.mkdir(job.dir,{recursive:true});await fs.writeFile(path.join(job.dir,'job.json'),contents);});try{await job.savePromise;}catch{}}
   function progress(job,phase,message){job.phase=phase;job.message=message;const event={at:Date.now(),phase,message};job.events.push(event);if(job.events.length>100)job.events.shift();fs.appendFile(path.join(job.dir,'progress.jsonl'),JSON.stringify(event)+'\n').catch(()=>{});save(job);}
@@ -142,8 +148,8 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
         if(!req.headers.cookie?.split(';').some(c=>c.trim()==='endstep_session='+session))return apiError(res,401,'请从应用首页打开。');
         if(!['GET','HEAD'].includes(req.method)&&((req.headers.origin&&req.headers.origin!=='http://'+host)||req.headers['x-endstep-request']!=='1'))return apiError(res,403,'请求来源无效。');
         if(req.method==='GET'&&url.pathname==='/api/health'){try{return json(res,{...(await codex.status()),forge:await forge.status(),version,mode:'forge-search'});}catch(e){return json(res,{connected:false,loggedIn:false,error:e.message,mode:'connected'});}}
-        if(req.method==='GET'&&url.pathname==='/api/current'){const r=replays.get(currentId);return json(res,r?{id:r.id,filename:r.filename,jsonl:r.model.sourceText,review:r.review,evidence:r.searchEvidence||[],deckProfiles:r.matchDecks?{byGame:r.matchDecks.byGame,sideboardPlans:r.matchDecks.sideboardPlans,scope:r.matchDecks.scope}:null,jobs:[...jobs.values()].filter(j=>j.replayId===r.id).map(snapshot)}:null);}
-        if(req.method==='POST'&&url.pathname==='/api/replays'){const b=await body(req);if(typeof b.jsonl!=='string'||typeof b.filename!=='string')throw Error('回放输入格式无效。');const r=await register(b.jsonl,b.filename);return json(res,{id:r.id,review:r.review,evidence:r.searchEvidence||[],deckProfiles:r.matchDecks?{byGame:r.matchDecks.byGame,sideboardPlans:r.matchDecks.sideboardPlans,scope:r.matchDecks.scope}:null});}
+        if(req.method==='GET'&&url.pathname==='/api/current'){const r=replays.get(currentId);return json(res,r?{id:r.id,filename:r.filename,jsonl:r.model.sourceText,review:r.review,evidence:r.searchEvidence||[],deckProfiles:publicDeckProfile(r.matchDecks),jobs:[...jobs.values()].filter(j=>j.replayId===r.id).map(snapshot)}:null);}
+        if(req.method==='POST'&&url.pathname==='/api/replays'){const b=await body(req);if(typeof b.jsonl!=='string'||typeof b.filename!=='string')throw Error('回放输入格式无效。');const r=await register(b.jsonl,b.filename);return json(res,{id:r.id,review:r.review,evidence:r.searchEvidence||[],deckProfiles:publicDeckProfile(r.matchDecks)});}
         if(req.method==='GET'&&parts[1]==='replays'&&parts[3]==='branch-start'&&parts.length===4){
           const replay=replays.get(parts[2]),line=Number(url.searchParams.get('line'));
           if(!replay||!Number.isSafeInteger(line)||line<1)return apiError(res,400,'请选择已导入回放中的具体操作。');
@@ -167,13 +173,15 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
             if(checked.status!=='ready')return apiError(res,409,checked.reason);
             if(r.matchDecks!==profiles)return apiError(res,409,'牌表已更新，请重新选择节点并核对分支起点。');
           }
+          const reviewOptions=b.type==='review'?readReviewOptions(b.reviewOptions):undefined;
+          const manualSideboard=profileJob&&b.manualSideboard!=null?readManualSideboard(b.manualSideboard):undefined;
           const running=[...jobs.values()].filter(j=>j.status==='running');
-          const existing=running.find(j=>j.replayId===r.id&&j.type===b.type&&j.sourceLine===sourceLine&&j.parentJobId===(parent?.id||null)&&(profileJob||j.intent===focus&&JSON.stringify(j.stressCards||[])===JSON.stringify(stressCards)));if(existing)return json(res,snapshot(existing));
+          const existing=running.find(j=>j.replayId===r.id&&j.type===b.type&&j.sourceLine===sourceLine&&j.parentJobId===(parent?.id||null)&&JSON.stringify(j.reviewOptions)===JSON.stringify(reviewOptions)&&JSON.stringify(j.manualSideboard)===JSON.stringify(manualSideboard)&&(profileJob||j.intent===focus&&JSON.stringify(j.stressCards||[])===JSON.stringify(stressCards)));if(existing)return json(res,snapshot(existing));
           if(profileJob&&running.some(j=>j.replayId===r.id&&['review','prepare'].includes(j.type)))return apiError(res,409,'这个对局正在更新牌表，请稍后再试。');
           if([...jobs.values()].filter(j=>j.status==='running').length>=2)return apiError(res,429,'已有两个任务正在执行，请稍后再试。');
           if(nodeJob)Scenario.sourceAt(r.model.sourceText,sourceLine);
           const deckPreferences=profileJob?readDeckPreferences(b.deckPreferences):null;
-          const id=crypto.randomUUID(),job={id,replayId:r.id,type:b.type,sourceLine,parentJobId:parent?.id||null,intent:focus,stressCards,deckPreferences,forceReview:b.type==='review'&&!!r.review,status:'running',phase:'queued',message:'任务已提交。',createdAt:Date.now(),events:[],dir:path.join(dataDir,'jobs',id),abort:new AbortController()};
+          const id=crypto.randomUUID(),job={id,replayId:r.id,type:b.type,sourceLine,parentJobId:parent?.id||null,intent:focus,stressCards,deckPreferences,reviewOptions,manualSideboard,forceReview:b.type==='review'&&!!r.review,status:'running',phase:'queued',message:'任务已提交。',createdAt:Date.now(),events:[],dir:path.join(dataDir,'jobs',id),abort:new AbortController()};
           jobs.set(id,job);try{await fs.mkdir(job.dir,{recursive:true});}catch(error){jobs.delete(id);throw error;}
           run(job,r,job.intent);return json(res,snapshot(job));
         }

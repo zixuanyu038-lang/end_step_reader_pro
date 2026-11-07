@@ -1,6 +1,6 @@
 {
   "name": "endstep-studio",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "private": true,
   "description": "Codex-powered MTG match review and hypothetical replay branches",
   "scripts": {

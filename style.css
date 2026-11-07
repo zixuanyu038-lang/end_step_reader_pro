@@ -80,3 +80,15 @@
 .studio-stage-actions>.import-button{min-height:39px;font-size:12px}
 .pressure-comparison ul{margin:8px 0 12px;padding-left:18px;line-height:1.7}
 @media(max-width:650px){.studio-heading{flex-wrap:wrap}.studio-stage-actions{justify-content:flex-start}}
+.review-settings{margin:1rem 0;padding:.8rem 1rem;border:1px solid #d5d7ca;display:flex;align-items:center;flex-wrap:wrap;gap:.5rem 1rem}
+.review-settings legend{padding:0 .3rem;font-size:.85rem}
+.review-settings select{font:inherit;color:inherit;background:transparent;border:1px solid #aeb5a4;padding:.25rem .4rem}
+.review-settings p{width:100%;margin:0;font-size:.85rem}
+.studio-sideboard{margin:0 0 16px;border-bottom:1px solid var(--line);padding:0 0 14px}
+.studio-sideboard summary{cursor:pointer}
+.studio-sideboard fieldset{border:0;margin:0;padding:0;min-width:0}
+.studio-sideboard h3{font-size:.9rem;margin:.75rem 0 .35rem}
+.sideboard-inputs,.sideboard-cards:not([hidden]){display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,14rem),1fr));gap:.5rem 1rem}
+.sideboard-cards:not([hidden]){grid-template-columns:repeat(2,minmax(0,1fr));margin:.45rem 0}
+.sideboard-cards label{font-size:.8rem}
+.sideboard-cards textarea{width:100%;display:block;padding:.4rem}

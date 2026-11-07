@@ -159,6 +159,8 @@ public final class EngineWorker {
                 if(context.wanted()!=null){
                     List<Choice> options=candidates(context,actor);Choice selected=null;
                     for(Choice option:options)if(context.matches(option.action,context.wanted())){selected=option;break;}
+                    if(selected==null&&str(context.wanted(),"timing","").equals("at_start"))
+                        throw new InvalidAction("Requested action unavailable at start: "+str(context.wanted(),"cardName",str(context.wanted(),"action","")));
                     if(selected==null&&context.game.getStack().isEmpty()&&context.needsManaPreparation())for(Choice option:options)if(option.ability!=null&&context.allowed(option)){selected=option;break;}
                     if(selected==null||selected.ability==null){JsonObject pass=new JsonObject();pass.addProperty("actorId",context.viewer);pass.addProperty("kind","pass");context.completed(pass);return null;}
                     context.pending=selected;context.decisions.add(selected.action);MyRandom.setRandom(new Random(decisionSeed));return List.of(selected.ability);

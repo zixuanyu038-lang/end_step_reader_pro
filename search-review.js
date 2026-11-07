@@ -1,17 +1,18 @@
 'use strict';
 const fs=require('node:fs/promises'),path=require('node:path'),crypto=require('node:crypto');
 const Source=require('./search-source'),S=require('./studio-schema'),Schema=require('./search-schema'),Protocol=require('./search-protocol'),LegacyProtocol=require('./studio-protocol');
-const {buildWorld}=require('./hidden-worlds'),{search}=require('./tree-search');
+const {buildWorld}=require('./hidden-worlds'),{search,inspectSearchWorlds}=require('./tree-search');
 const {prepareMatchDecks}=require('./match-decks');
 const {routeFromTrace,compileReplay}=require('./forge-replay');
 const {selectWinningLines}=require('./winning-lines');
 const digest=x=>crypto.createHash('sha256').update(x).digest('hex');
 const packProfile=profile=>({...profile,catalog:[...profile.catalog]});
-async function ensureMatchDecks({replay,profileDir,deckService,forge,ask,signal,onProgress,deckPreferences}){
-  if(deckPreferences){
-    const preferencesKey=digest(JSON.stringify(deckPreferences));
+const publicDeckProfile=profile=>profile?{byGame:profile.byGame,sideboardPlans:profile.sideboardPlans,scope:profile.scope,manualSideboard:profile.manualSideboard||[]}:null;
+async function ensureMatchDecks({replay,profileDir,deckService,forge,ask,signal,onProgress,deckPreferences,manualSideboard}){
+  if(deckPreferences||manualSideboard){
+    const preferencesKey=digest(JSON.stringify({deckPreferences,manualSideboard:manualSideboard||[]}));
     if(replay.matchDecks?.preferencesKey===preferencesKey)return replay.matchDecks;
-    const profile=await prepareMatchDecks({model:replay.model,deckService,forge,ask,signal,onProgress,deckPreferences});
+    const profile=await prepareMatchDecks({model:replay.model,deckService,forge,ask,signal,onProgress,deckPreferences,manualSideboard});
     return {...profile,preferencesKey};
   }
   if(replay.matchDecks)return replay.matchDecks;
@@ -23,9 +24,9 @@ async function ensureMatchDecks({replay,profileDir,deckService,forge,ask,signal,
 async function prepareOnly({job,replay,profileDir,deckService,forge,ask,progress}){
   progress(job,'decks','正在固定双方牌表与换备方案…');
   const previous=replay.matchDecks;
-  const profile=await ensureMatchDecks({replay,profileDir,deckService,forge,deckPreferences:job.deckPreferences,signal:job.abort.signal,
+  const profile=await ensureMatchDecks({replay,profileDir,deckService,forge,deckPreferences:job.deckPreferences,manualSideboard:job.manualSideboard,signal:job.abort.signal,
     ask:(prompt,schema,options)=>ask(job,prompt,schema,options),onProgress:message=>progress(job,'decks',message)});
-  const deckProfiles={byGame:profile.byGame,sideboardPlans:profile.sideboardPlans,scope:profile.scope};
+  const deckProfiles=publicDeckProfile(profile);
   if(profile===previous)return {deckProfiles,review:replay.review,evidence:replay.searchEvidence};
   await fs.mkdir(profileDir,{recursive:true});
   const preparedAt=new Date().toISOString(),file=path.join(profileDir,replay.id+'.json'),temporary=file+'.'+job.id+'.tmp';
@@ -88,31 +89,49 @@ async function writeWinningReplays(records,job){
 async function runForgeReview({job,replay,ask,progress,forge,deckService,cacheDir,budget={},nodeLimit=8}){
   const model=replay.model,all=Source.candidates(model.sourceText),directory=path.join(job.dir,'search');await fs.mkdir(directory,{recursive:true});
   progress(job,'decks','正在读取整盘公开信息，固定双方牌表并分析换备…');
-  const matchDecks=await ensureMatchDecks({replay,profileDir:path.join(path.dirname(cacheDir),'deck-profiles'),deckService,forge,deckPreferences:job.deckPreferences,signal:job.abort.signal,ask:(prompt,schema,options)=>ask(job,prompt,schema,options),onProgress:message=>progress(job,'decks',message)});
+  const matchDecks=await ensureMatchDecks({replay,profileDir:path.join(path.dirname(cacheDir),'deck-profiles'),deckService,forge,deckPreferences:job.deckPreferences,manualSideboard:job.manualSideboard,signal:job.abort.signal,ask:(prompt,schema,options)=>ask(job,prompt,schema,options),onProgress:message=>progress(job,'decks',message)});
   const storedDecks=packProfile(matchDecks);
   await fs.writeFile(path.join(directory,'match-decks.json'),JSON.stringify(storedDecks,null,2));
-  progress(job,'screen','正在通读对局，筛选需要搜索的关键节点…');
-  const selected=replay.initialSelection||await ask(job,Protocol.shortlistPrompt(model,all),Schema.shortlist);S.validate(selected,Schema.shortlist);
+  const {aiShortlist=true,searchMode='standard'}=job.reviewOptions||{};
+  const deep=searchMode==='deep';
+  if(deep){nodeLimit=all.length;budget={...budget,iterations:120,width:12,maxDepth:16};}
+  let proposedNodes=[];
+  if(aiShortlist){
+    progress(job,'screen','正在通读对局，筛选需要搜索的关键节点…');
+    const selected=replay.initialSelection||await ask(job,Protocol.shortlistPrompt(model,all),Schema.shortlist);
+    S.validate(selected,Schema.shortlist);
+    proposedNodes=selected.nodes;
+  }else progress(job,'screen','已跳过 AI 初筛，正在按局排列公开记录中的候选节点…');
   const index=new Map(all.map(n=>[n.sourceLine,n])),shortlisted=[];
-  for(const proposed of selected.nodes)if(index.has(proposed.sourceLine)&&!shortlisted.some(n=>n.sourceLine===proposed.sourceLine))shortlisted.push({...index.get(proposed.sourceLine),...proposed,priority:Math.max(1,Math.min(100,proposed.priority))});
-  for(const node of all)if(!shortlisted.some(n=>n.sourceLine===node.sourceLine))shortlisted.push({...node,priority:/Flame of Anor/.test(node.cardName)?70:/Brainstorm|Tamiyo|Force of/.test(node.cardName)?35:10,question:'比较 '+node.cardName+' 的时机与资源安排',alternatives:[],reason:'候补研究节点'});
-  const games=[...new Set(all.map(n=>n.game))];
+  for(const proposed of proposedNodes)if(index.has(proposed.sourceLine)&&!shortlisted.some(n=>n.sourceLine===proposed.sourceLine))shortlisted.push({...index.get(proposed.sourceLine),...proposed,priority:Math.max(1,Math.min(100,proposed.priority))});
+  for(const node of all)if(!shortlisted.some(n=>n.sourceLine===node.sourceLine))shortlisted.push({...node,priority:aiShortlist&&/Flame of Anor/.test(node.cardName)?70:aiShortlist&&/Brainstorm|Tamiyo|Force of/.test(node.cardName)?35:10,question:'比较 '+node.cardName+' 的时机与资源安排',alternatives:[],reason:aiShortlist?'候补研究节点':'原局操作'});
+  const games=[...new Set(model.turns.map(turn=>turn.game))];
   const queue=[];
   // Establish coverage of every recorded game before filling the remaining research budget.
   for(const game of games)for(const node of shortlisted.filter(n=>n.game===game).sort((a,b)=>b.priority-a.priority).slice(0,2))queue.push(node);
   for(const node of shortlisted.slice().sort((a,b)=>b.priority-a.priority))if(!queue.some(n=>n.sourceLine===node.sourceLine))queue.push(node);
-  const records=[],unsupported=[],evidence=[];
+  const records=[],unsupported=[],searchFailures=[],evidence=[];
   const partial={summary:'已筛出研究节点，正在用 Forge 比较候选路线。',overallPlan:'完整复盘会在搜索证据解读完成后显示。',games:games.map(game=>({game,summary:'搜索进行中。',findings:[]})),hiddenHands:[],takeaways:[]};
   job.result={review:partial,reviewPending:true,reviewRevision:0,evidence,gameStages:games.map(game=>({game,message:'等待搜索'}))};
   for(const node of queue){
     if(records.length>=nodeLimit)break;if(job.abort.signal.aborted)throw Error('任务已取消。');
-    progress(job,'restore',`正在准备第 ${node.game} 局 T${node.turn}：${node.cardName}…`);
+    progress(job,'restore',`正在校验第 ${node.game} 局 T${node.turn} · ${node.cardName} 的起点…`);
+    let source,worlds,checkedWorlds;
     try{
-      const source=Source.sourceAt(model.sourceText,node.sourceLine);
+      source=Source.sourceAt(model.sourceText,node.sourceLine);
       const prepared={decks:matchDecks.byGame[source.game],catalog:matchDecks.catalog};
-      const worlds=buildWorlds(source,prepared,3);
+      worlds=buildWorlds(source,prepared,3);
+      checkedWorlds=await inspectSearchWorlds({client:forge,source,worlds,signal:job.abort.signal});
+    }catch(error){
+      if(job.abort.signal.aborted)throw error;
+      unsupported.push({sourceLine:node.sourceLine,game:node.game,cardName:node.cardName,reason:error.message});
+      await fs.writeFile(path.join(directory,'unsupported.json'),JSON.stringify(unsupported,null,2));
+      progress(job,'restore',`已跳过 ${unsupported.length} 个不可恢复节点，继续检查后续节点。`);
+      continue;
+    }
+    try{
       let last=0;
-      const result=await search({client:forge,source,worlds,signal:job.abort.signal,budget,onProgress:p=>{
+      const result=await search({client:forge,source,worlds,checkedWorlds,signal:job.abort.signal,budget,onProgress:p=>{
         if(Date.now()-last>1200||p.iteration===p.iterations){last=Date.now();progress(job,'search',`第 ${node.game} 局 T${node.turn} · 隐藏世界 ${p.world}/${p.worlds} · 搜索 ${p.iteration}/${p.iterations} · 已模拟 ${p.simulated} 次`);}
       }});
       const record={source,result,worlds,node};records.push(record);evidence.push(compactEvidence(record));
@@ -120,20 +139,28 @@ async function runForgeReview({job,replay,ask,progress,forge,deckService,cacheDi
       job.result.reviewRevision++;job.result.gameStages=games.map(game=>({game,message:`已搜索 ${records.filter(r=>r.source.game===game).length} 个节点`}));
       progress(job,'search',`已完成 ${records.length}/${nodeLimit} 个关键节点，继续比较其余节点…`);
     }catch(error){
-      if(job.abort.signal.aborted)throw error;unsupported.push({sourceLine:node.sourceLine,game:node.game,cardName:node.cardName,reason:error.message});
-      await fs.writeFile(path.join(directory,'unsupported.json'),JSON.stringify(unsupported,null,2));
-      progress(job,'limited',`${node.cardName} 的这个节点暂未通过恢复或模拟核对，正在检查其他关键节点。`);
-      if(unsupported.length>=14&&records.length>=Math.min(3,nodeLimit))break;
+      if(job.abort.signal.aborted)throw error;
+      searchFailures.push({sourceLine:node.sourceLine,game:node.game,cardName:node.cardName,reason:error.message});
+      await fs.writeFile(path.join(directory,'search-failures.json'),JSON.stringify(searchFailures,null,2));
+      progress(job,'limited',`${node.cardName} 的可恢复节点未完成路线比较，继续搜索后续节点。`);
     }
   }
-  if(!records.length)throw Error('没有节点通过真实 Forge 搜索：'+unsupported.slice(0,3).map(n=>n.reason).join('；'));
-  await selectWinningLines({records,forge,signal:job.abort.signal,ask:(prompt,schema)=>ask(job,prompt,schema),onProgress:message=>progress(job,'quality',message)});
+  if(!records.length&&searchFailures.length)throw Error('可恢复节点未能完成路线比较。'+searchFailures[0].reason);
+  const qualityBatchSize=deep?4:records.length;
+  for(let offset=0;offset<records.length;offset+=qualityBatchSize){
+    await selectWinningLines({records:records.slice(offset,offset+qualityBatchSize),forge,signal:job.abort.signal,ask:(prompt,schema)=>ask(job,prompt,schema),onProgress:message=>progress(job,'quality',deep?`节点 ${offset+1}–${Math.min(offset+qualityBatchSize,records.length)}/${records.length} · ${message}`:message)});
+  }
   await writeWinningReplays(records,job);
   evidence.splice(0,evidence.length,...records.map(compactEvidence));
   for(const record of records)await fs.writeFile(path.join(directory,'node-'+record.node.sourceLine+'.json'),JSON.stringify({node:record.node,worlds:record.worlds,result:record.result},null,2));
   progress(job,'explain','正在根据真实搜索轨迹整理整盘复盘、费用核对和具体建议…');
-  const prompt=Protocol.reviewPrompt(model,records,unsupported);
-  let review=await ask(job,prompt,S.review);S.validate(review,S.review);
+  // Keep the explanation prompt bounded. Keep all raw evidence and verified replays on disk.
+  const explainRecords=deep?games.flatMap(game=>records.filter(r=>r.source.game===game)
+    .sort((a,b)=>Number(!!b.result.quality?.keep)-Number(!!a.result.quality?.keep)||b.node.priority-a.node.priority)
+    .slice(0,Math.max(2,Math.floor(12/games.length)))):records;
+  const gaps=unsupported.concat(searchFailures);
+  const prompt=Protocol.reviewPrompt(model,explainRecords,deep?gaps.slice(0,20):gaps);
+  let review=records.length?await ask(job,prompt,S.review):{...partial,summary:'已检查候选节点，没有可恢复的搜索起点。',overallPlan:'请参考原局战报。',games:games.map(game=>({game,summary:'没有通过起点校验的节点。',findings:[]})),takeaways:['这轮没有可用于比较打法的 Forge 搜索轨迹。']};S.validate(review,S.review);
   const byLine=new Map(records.map(r=>[r.node.sourceLine,r]));
   function ground(candidate){
   for(const game of candidate.games)for(const finding of game.findings){
@@ -159,7 +186,7 @@ async function runForgeReview({job,replay,ask,progress,forge,deckService,cacheDi
       const replacements=new Map(patch.replacements.map(p=>[p.originalSourceLine,p.finding]));for(const g of review.games)g.findings=g.findings.map(f=>replacements.get(f.sourceLine)||f);
     }else review=await ask(job,prompt+'\n上次结果未通过：'+error.message+'。修正结构与引用，不能虚构证据。',S.review);
   }
-  const outcome={review,evidence,unsupported,sideboardPlans:matchDecks.sideboardPlans,deckProfiles:{byGame:matchDecks.byGame,scope:matchDecks.scope},engine:'forge-2.0.15',reviewVersion:'forge-search-v2-wins',completedAt:new Date().toISOString()};
+  const outcome={review,evidence,unsupported,sideboardPlans:matchDecks.sideboardPlans,deckProfiles:publicDeckProfile(matchDecks),engine:'forge-2.0.15',reviewVersion:'forge-search-v2-wins',completedAt:new Date().toISOString()};
   job.abort.signal.throwIfAborted();
   await fs.mkdir(cacheDir,{recursive:true});
   const cacheFile=path.join(cacheDir,replay.id+'.json'),temporary=cacheFile+'.'+job.id+'.tmp';
@@ -172,4 +199,4 @@ async function runForgeReview({job,replay,ask,progress,forge,deckService,cacheDi
   job.result={...outcome,reviewPending:false,reviewRevision:job.result.reviewRevision+1,gameStages:games.map(game=>({game,message:`已完成 ${records.filter(r=>r.source.game===game).length} 个搜索节点`}))};
   return outcome;
 }
-module.exports={runForgeReview,prepareNode,seeds,compactEvidence,ensureMatchDecks,prepareOnly,shortlistOnly,buildWorlds,writeWinningReplays};
+module.exports={runForgeReview,prepareNode,seeds,compactEvidence,ensureMatchDecks,prepareOnly,shortlistOnly,buildWorlds,writeWinningReplays,publicDeckProfile};

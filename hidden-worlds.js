@@ -82,7 +82,7 @@ function buildWorld(source,decks,catalog,seed,{stressCard=null,stressCards=[]}={
     const pool=countCards(supplied.main.map(c=>({...c,name:canonicalName(c.name.split(' // ')[0])}))),side=countCards(supplied.sideboard.map(c=>({...c,name:canonicalName(c.name.split(' // ')[0])})));
     const physical=c=>c.name!=='Hidden card'&&!c.faceDown&&!c.isToken&&!(c.zone==='Command'&&!c.isCommander&&!c.isCompanion);
     const known=ZONES.flatMap(z=>(player[z]||[]).filter(physical)).concat((state.stack||[]).filter(s=>!s.isAbility&&!s.isTrigger&&String(s.sourceCard.ownerId)===String(player.id)).map(s=>s.sourceCard));
-    const libraryKnown=String(player.id)===String(source.header.seat)?source.known.filter(c=>String(c.ownerId)===String(player.id)&&!allCurrent.has(String(c.id))&&!c.isToken&&c.name!=='Hidden card'):[];
+    const libraryKnown=source.descriptionSetup||String(player.id)===String(source.header.seat)?source.known.filter(c=>String(c.ownerId)===String(player.id)&&!allCurrent.has(String(c.id))&&!c.isToken&&c.name!=='Hidden card'):[];
     const required=new Map();for(const c of known.concat(libraryKnown)){const name=nameOf(source,c);required.set(name,(required.get(name)||0)+1);}
     const replacements=[];
     function removeSpare(preferLand){

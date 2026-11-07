@@ -51,7 +51,8 @@ function compileReplay(source,run,{title='推荐分支',summary='',world,evidenc
   const header={...source.header,games:source.game,complete,result:complete&&run.state.winnerId!=null?(String(run.state.winnerId)===String(source.header.seat)?'win':'loss'):null,
     branchMeta:{format:'endstep-forge-search-branch',version:1,title,summary,engine:'forge-2.0.15',validation:'forge-executed-with-audited-root',sourceSha256:source.sha256,anchorLine:source.anchor.line,selectedLine:source.anchor.selectedLine,
       hypothetical:true,scope:'single-game-continuation',complete,stop:{reason:run.stopReason,turn:run.state.turnNumber},worldId:world.id,seed:world.root.seed,scenario:world.scenario,
-      deckInformationScope:'entire-replay-visible-information; retrospective inferred deck',assumptions:world.assumptions,intent,quality,
+      deckInformationScope:source.descriptionSetup?'user-described position; confirmed hypothetical setup':'entire-replay-visible-information; retrospective inferred deck',
+      ...(source.descriptionSetup?{sourceKind:'description',setupAssumptions:source.descriptionSetup}:{}),assumptions:world.assumptions,intent,quality,
       search:evidence?{algorithm:evidence.algorithm,settings:evidence.settings,simulated:evidence.simulated,comparison:evidence.comparison,limitations:evidence.limitations}:null}};
   const prefix=source.rows.slice(1).filter(x=>x.line<source.anchor.line).map(x=>x.raw),out=[JSON.stringify(header),...prefix];
   const used=new Set(source.rows.filter(x=>x.row.k==='event').map(x=>String(x.row.event.sequenceNumber)));
@@ -65,7 +66,13 @@ function compileReplay(source,run,{title='推荐分支',summary='',world,evidenc
       if(state.winnerId!=null)wins[Number(state.winnerId)]++;
       Object.assign(score,{winsBySeat:wins,player0Wins:wins[0],player1Wins:wins[1],gamesPlayed:(score.gamesPlayed||source.game-1)+1,isMatchOver:wins.some(n=>n>=Math.ceil((score.gamesPerMatch||3)/2))});
     }
-    if(index===0){emit(state);event('ADD_LOG',`[Forge 推荐分支 · ${complete?'完整后续':'搜索片段'} · 含隐藏信息假设] ${title}\n${summary}\n牌表依据整盘公开信息还原；手牌和牌库顺序来自固定假设世界，不是原局真实后续。`);
+    if(index===0){emit(state);
+      if(source.descriptionSetup){
+        const playerName=state.players.find(p=>String(p.id)===String(state.activePlayerId))?.name;
+        event('TURN_BEGAN',`Turn ${state.turnNumber} (${playerName})`,{turnNumber:state.turnNumber,playerIndex:state.activePlayerId,playerName});
+        event('TURN_PHASE',state.phase,{phase:state.phase,playerIndex:state.activePlayerId,playerName});
+      }
+      event('ADD_LOG',`[Forge ${source.descriptionSetup?'描述局面':'推荐分支'} · ${complete?'完整后续':'推演片段'}] ${title}\n${summary}\n${source.descriptionSetup?source.descriptionSetup.join('\n'):'牌表依据整盘公开信息还原；手牌和牌库顺序来自固定假设世界，不是原局真实后续。'}`);
       if(quality)event('ADD_LOG','[AI 胜局二筛] '+quality.reason+'\n限制：'+quality.risks.join('；'));
       for(const a of world.assumptions)event('ADD_LOG',`[牌表来源 · 玩家 ${a.playerId}] ${a.archetype}\n${a.sourceUrl}\n${a.basis}`);
       event('ADD_LOG','[假设手牌] '+world.hiddenHands.map(h=>source.baseline.players.find(p=>String(p.id)===h.playerId)?.name+'：'+h.cards.join(' / ')).join('\n'));continue;

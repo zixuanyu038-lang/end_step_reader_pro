@@ -30,6 +30,13 @@
     <section id="codex-view" class="codex-view" hidden>
       <section id="studio-panel" class="studio-panel">
         <header class="studio-heading"><div><h2>复盘工作台</h2><p id="studio-preparation-note">准备牌表后，可以直接从战报选节点，也可以让 AI 初筛。</p><span id="studio-model" class="studio-model">模型：读取配置中…</span></div><div class="studio-stage-actions"><button id="studio-prepare" class="import-button" disabled>准备对局</button><button id="studio-shortlist" class="import-button" disabled>AI 初筛节点</button><button id="studio-review" class="primary" disabled>生成整盘复盘 ↗</button></div></header>
+        <fieldset class="review-settings">
+          <legend>整盘复盘设置</legend>
+          <label><input id="review-ai-shortlist" type="checkbox" checked> 先由 AI 筛选节点</label>
+          <label for="review-search-mode">搜索预算</label>
+          <select id="review-search-mode" aria-describedby="review-search-note"><option value="standard">标准</option><option value="deep">暴力大算</option></select>
+          <p id="review-search-note">标准最多搜索 8 个成功恢复的节点。关闭初筛后按原局顺序取样，优先覆盖每局。胜局二筛和最终解读仍使用 AI。</p>
+        </fieldset>
         <fieldset id="studio-deck-sources" class="studio-deck-sources" hidden>
           <legend>牌表来源</legend>
           <div class="deck-source-grid">
@@ -47,6 +54,11 @@
           <p id="studio-deck-hint">有完整回放牌表时优先使用记录。选择上传可指定对应一方的起始牌表。</p>
           <p id="studio-deck-format" hidden>请选择英文纯文本牌表，每行如 <code>4 Brainstorm</code>。备牌写在 <code>Sideboard</code> 下，或逐行用 <code>SB:</code> 标记。</p>
         </fieldset>
+        <details id="studio-sideboard" class="studio-sideboard" hidden>
+          <summary>手动换备</summary>
+          <p class="step-description">每局都相对第一局的主牌和备牌填写。每行写数量和完整英文牌名，例如 <code>2 Pyroblast</code>。勾选后留空表示这局不换备。</p>
+          <fieldset id="studio-sideboard-fields"><div id="studio-sideboard-games"></div><button type="button" id="studio-apply-sideboard" class="import-button" disabled>应用换备</button></fieldset>
+        </details>
         <div id="studio-job" class="studio-job" hidden><div><span id="studio-job-label"></span><p id="studio-job-message" role="status"></p></div><button id="studio-cancel" class="text-button">停止</button></div>
         <div id="studio-game-stages" class="studio-game-stages"></div>
         <section id="studio-overview" class="studio-overview" hidden></section>

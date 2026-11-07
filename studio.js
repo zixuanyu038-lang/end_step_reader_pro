@@ -27,6 +27,8 @@
     const modelAvailable=state.ready&&state.loggedIn&&state.replayId&&!busy;
     const available=modelAvailable&&state.forgeInstalled;
     el('studio-review').disabled=el('studio-prepare').disabled=!available||needsFile;
+    el('studio-sideboard-fields').disabled=busy;
+    el('studio-apply-sideboard').disabled=!available||needsFile;
     el('studio-shortlist').disabled=!modelAvailable;
     el('studio-prepare').textContent=state.deckProfiles?'重新准备':'准备对局';
     el('studio-preparation-note').textContent=state.deckProfiles?'对局已准备。可从中文战报选节点，或查看 AI 初筛结果。':'准备牌表后，可以直接从战报选节点，也可以让 AI 初筛。';
@@ -72,9 +74,24 @@
     }
     return preferences;
   }
+  function renderManualSideboard(plans=[]){
+    const games=[...new Set((state.model?.turns||[]).map(turn=>turn.game))].filter(game=>game>1);
+    el('studio-sideboard').hidden=!state.replayId||!games.length;
+    const own=Number(state.model?.header.seat);
+    const lineText=cards=>(cards||[]).map(c=>c.count+' '+c.name).join('\n');
+    el('studio-sideboard-games').innerHTML=games.map(game=>`<section><h3>第 ${game} 局</h3><div class="sideboard-inputs">${[own,1-own].map((seat,index)=>{
+      const plan=plans.find(p=>p.game===game&&p.playerId===String(seat));
+      return `<div data-sideboard-game="${game}" data-seat="${seat}"><label><input type="checkbox"${plan?' checked':''}> 手动指定${index?'对手':'己方'}</label><div class="sideboard-cards"${plan?'':' hidden'}><label>换入<textarea rows="3" data-sideboard-in placeholder="2 Pyroblast">${html(lineText(plan?.ins))}</textarea></label><label>换出<textarea rows="3" data-sideboard-out placeholder="2 Force of Will">${html(lineText(plan?.outs))}</textarea></label></div></div>`;
+    }).join('')}</div></section>`).join('');
+  }
+  function manualSideboard(){
+    return Array.from(el('studio-sideboard-games').querySelectorAll('[data-sideboard-game]')).filter(row=>row.querySelector('input').checked).map(row=>({
+      game:Number(row.dataset.sideboardGame),playerId:row.dataset.seat,inText:row.querySelector('[data-sideboard-in]').value,outText:row.querySelector('[data-sideboard-out]').value
+    }));
+  }
   function renderJob(){
     const job=state.job;renderNodeJob();el('studio-job').hidden=!job;if(!job){el('studio-game-stages').innerHTML='';controls();return;}
-    el('studio-job').dataset.status=job.status;el('studio-job-label').textContent=(jobNames[job.type]||'复盘任务')+(job.createdAt?' · '+Math.floor(((job.status==='running'?Date.now():(job.events?.at(-1)?.at||Date.now()))-job.createdAt)/60000)+' 分钟':'');el('studio-job-message').textContent=job.error?job.message+'\n'+job.error:job.status==='complete'&&job.type==='review'?'已验证 '+(job.result?.evidence?.length||0)+' 个节点，保留 '+(job.result?.evidence?.filter(e=>e.quality?.keep).length||0)+' 条指导路线。':job.message;el('studio-cancel').hidden=job.status!=='running';el('studio-cancel').disabled=!job.id;el('studio-game-stages').innerHTML=(job.status==='running'?job.result?.gameStages||[]:[]).map(g=>'<div><b>第 '+g.game+' 局</b><span>'+html(g.message)+'</span></div>').join('');controls();
+    el('studio-job').dataset.status=job.status;el('studio-job-label').textContent=(jobNames[job.type]||'复盘任务')+(job.reviewOptions?.searchMode==='deep'?' · 暴力大算':'')+(job.createdAt?' · '+Math.floor(((job.status==='running'?Date.now():(job.events?.at(-1)?.at||Date.now()))-job.createdAt)/60000)+' 分钟':'');el('studio-job-message').textContent=job.error?job.message+'\n'+job.error:job.status==='complete'&&job.type==='review'?'已搜索 '+(job.result?.evidence?.length||0)+' 个节点，跳过 '+(job.result?.unsupported?.length||0)+' 个不可恢复节点，保留 '+(job.result?.evidence?.filter(e=>e.quality?.keep).length||0)+' 条指导路线。':job.message;el('studio-cancel').hidden=job.status!=='running';el('studio-cancel').disabled=!job.id;el('studio-game-stages').innerHTML=(job.status==='running'?job.result?.gameStages||[]:[]).map(g=>'<div><b>第 '+g.game+' 局</b><span>'+html(g.message)+'</span></div>').join('');controls();
   }
   function renderNodeJob(){
     const status=el('studio-node-job');if(!status)return;
@@ -91,7 +108,7 @@
   }
   function evidenceDetails(){
     const profiles=state.deckProfiles,plans=state.sideboardPlans.length?state.sideboardPlans:profiles?.sideboardPlans||[];
-    const decks=profiles?.byGame?'<details class="review-evidence"><summary>牌表与换备</summary><p class="step-description">参考牌表按整盘公开信息还原。你的实际换备优先保留；对手换备为 AI 推定。</p>'+Object.entries(profiles.byGame).map(([g,ds])=>'<details><summary>第 '+g+' 局</summary><div class="deck-columns">'+ds.map(d=>'<div><h4>'+html(playerName(d.playerId??ds.indexOf(d)))+'</h4><p>'+html(d.archetype||'录制牌表')+' · '+sourceLink(d)+'</p><p class="step-description">'+html(d.basis)+'</p><details><summary>主牌 '+d.main.reduce((n,c)=>n+c.count,0)+' / 备牌 '+d.sideboard.reduce((n,c)=>n+c.count,0)+'</summary><div class="deck-list">'+cardList(d.main)+'<hr>'+cardList(d.sideboard)+'</div></details>'+(d.adjustments?.length?'<p class="step-description">推定调整：'+html(d.adjustments.map(a=>(a.removed||'空位')+' → '+(a.added||'移除')).join('；'))+'</p>':'')+'</div>').join('')+'</div>'+plans.filter(p=>String(p.game)===g).map(p=>'<div class="sideboard-plan"><h4>'+html(playerName(p.playerId))+' · AI 换备建议</h4><p>'+html((p.swaps||[]).map(c=>c.count+' × '+c.outName+' → '+c.inName).join('；')||'不换牌')+'</p><p>'+html(p.reason)+'</p><small>'+html(p.uncertainties.join('；'))+'</small></div>').join('')+'</details>').join('')+'</details>':'';
+    const decks=profiles?.byGame?'<details class="review-evidence"><summary>牌表与换备</summary><p class="step-description">参考牌表按整盘公开信息还原。已应用的手动换备优先用于推演，其余采用录制或推定方案。</p>'+Object.entries(profiles.byGame).map(([g,ds])=>'<details><summary>第 '+g+' 局</summary><div class="deck-columns">'+ds.map(d=>'<div><h4>'+html(playerName(d.playerId??ds.indexOf(d)))+'</h4><p>'+html(d.archetype||'录制牌表')+' · '+sourceLink(d)+'</p><p class="step-description">'+html(d.basis)+'</p><details><summary>主牌 '+d.main.reduce((n,c)=>n+c.count,0)+' / 备牌 '+d.sideboard.reduce((n,c)=>n+c.count,0)+'</summary><div class="deck-list">'+cardList(d.main)+'<hr>'+cardList(d.sideboard)+'</div></details>'+(d.adjustments?.length?'<p class="step-description">推定调整：'+html(d.adjustments.map(a=>(a.removed||'空位')+' → '+(a.added||'移除')).join('；'))+'</p>':'')+'</div>').join('')+'</div>'+plans.filter(p=>String(p.game)===g).map(p=>'<div class="sideboard-plan"><h4>'+html(playerName(p.playerId))+' · '+(p.manual?'手动换备':'AI 换备建议')+'</h4><p>'+html((p.manual?[...(p.outs||[]).map(c=>'换出 '+c.count+' × '+c.name),...(p.ins||[]).map(c=>'换入 '+c.count+' × '+c.name)]:(p.swaps||[]).map(c=>c.count+' × '+c.outName+' → '+c.inName)).join('；')||'不换牌')+'</p><p>'+html(p.reason)+'</p><small>'+html(p.uncertainties.join('；'))+'</small></div>').join('')+'</details>').join('')+'</details>':'';
     const ev=state.evidence||[];
     return decks+(ev.length?'<details class="review-evidence"><summary>搜索依据 · '+ev.length+' 个节点</summary><p class="step-description">以下为有限候选、有限深度下的启发式比较，评分不是胜率。每个节点使用同一副牌表，比较三组固定手牌与库序；包含明确标注的压力情景。</p>'+ev.map(e=>'<details><summary>第 '+e.game+' 局 · '+html(e.question)+' · '+e.simulated+' 次模拟</summary>'+(e.searchElapsedMs!=null?'<p>规则搜索用时 '+(e.searchElapsedMs/1000).toFixed(1)+' 秒（不含模型分析与二筛）</p>':'')+'<p>胜局候选 '+(e.winningCandidates||0)+' · '+html(e.quality?.reason||'正在筛选')+'</p><div class="evidence-table-wrap"><table><thead><tr><th>节点选择</th><th>平均评分</th><th>访问次数</th></tr></thead><tbody>'+e.alternatives.slice(0,5).map(a=>'<tr><td>'+html(a.action.label||a.action.cardName||'让过')+'</td><td>'+Math.round(a.mean)+'</td><td>'+a.visits+'</td></tr>').join('')+'</tbody></table></div><p class="step-description">'+html(e.limitations.join('；'))+'</p></details>').join('')+'</details>':'');
   }
@@ -209,7 +226,8 @@
       const stressCards=sourceLine===null?[]:(state.stressDrafts.get(sourceLine)||'').split(/\r?\n/).map(name=>name.trim()).filter(Boolean);
       const deckPreferences=['review','prepare'].includes(type)?await reviewDeckPreferences():null;
       if(version!==state.version)return;
-      const job=await api('/api/jobs',{method:'POST',body:JSON.stringify({type,replayId:state.replayId,sourceLine,parentJobId,focus:intent,deckPreferences,stressCards})});
+      const reviewOptions=type==='review'?{aiShortlist:el('review-ai-shortlist').checked,searchMode:el('review-search-mode').value}:undefined;
+      const job=await api('/api/jobs',{method:'POST',body:JSON.stringify({type,replayId:state.replayId,sourceLine,parentJobId,focus:intent,deckPreferences,stressCards,reviewOptions,manualSideboard:deckPreferences?manualSideboard():undefined})});
       if(version!==state.version)return;
       state.job=job;renderJob();watch(job.id,version);
     }catch(error){if(version!==state.version)return;state.job={type,sourceLine,status:'failed',message:'提交失败。',error:error.message};renderJob();if(nodeJob&&error.status===409&&state.line===sourceLine)checkSelectedBranch({retry:true});notify(error.message,true);}
@@ -220,13 +238,22 @@
     state.shortlist=null;
     for(const side of deckSides){el('studio-deck-mode-'+side).value='local';el('studio-deck-file-'+side).value='';}
     const version=++state.version;clearTimeout(state.poll);state.model=next;state.evidence=[];state.deckProfiles=null;state.sideboardPlans=[];state.replayId=null;state.review=null;state.line=null;state.route=[];state.edits.clear();state.plans.clear();state.job=null;state.result=null;state.reviewPending=false;state.reviewRevision=null;renderOverview();renderNodes();renderResult();renderJob();
+    renderManualSideboard();
     el('review-node').innerHTML='<div class="review-placeholder"><h3>选择一个分支节点</h3><p>准备对局后，可到中文战报选操作，再输入你想测试的打法。</p></div>';
     if(!state.ready)return;
-    try{const registered=await api('/api/replays',{method:'POST',body:JSON.stringify({filename:next.filename||'replay.esreplay',jsonl:next.sourceText})});if(version!==state.version)return;state.replayId=registered.id;try{state.edits=new Map(JSON.parse(sessionStorage.getItem('endstep-intents:'+state.replayId)||'[]'));state.stressDrafts=new Map(JSON.parse(sessionStorage.getItem('endstep-pressure:'+state.replayId)||'[]'));}catch{}state.review=registered.review;acceptEvidence(registered);renderOverview();renderNodes();controls();switchView('codex');if(findings().length)openNode(findings()[0].sourceLine,false);}catch(error){notify('后端导入失败：'+error.message,true);}
+    try{const registered=await api('/api/replays',{method:'POST',body:JSON.stringify({filename:next.filename||'replay.esreplay',jsonl:next.sourceText})});if(version!==state.version)return;state.replayId=registered.id;try{state.edits=new Map(JSON.parse(sessionStorage.getItem('endstep-intents:'+state.replayId)||'[]'));state.stressDrafts=new Map(JSON.parse(sessionStorage.getItem('endstep-pressure:'+state.replayId)||'[]'));}catch{}state.review=registered.review;acceptEvidence(registered);renderManualSideboard(registered.deckProfiles?.manualSideboard);renderOverview();renderNodes();controls();switchView('codex');if(findings().length)openNode(findings()[0].sourceLine,false);}catch(error){notify('后端导入失败：'+error.message,true);}
   }
   el('studio-review').onclick=()=>submit('review');
   el('studio-prepare').onclick=()=>submit('prepare');
   el('studio-shortlist').onclick=()=>submit('shortlist');
+  el('studio-apply-sideboard').onclick=()=>submit('prepare');
+  el('studio-sideboard-games').onchange=event=>{
+    if(event.target.type==='checkbox')event.target.closest('[data-sideboard-game]').querySelector('.sideboard-cards').hidden=!event.target.checked;
+  };
+  el('review-search-mode').onchange=()=>{
+    const deep=el('review-search-mode').value==='deep';
+    el('review-search-note').textContent=(deep?'暴力大算搜索全部可恢复节点。每节点三个世界，每世界最多 120 次迭代，可能运行很久，可随时取消。':'标准最多搜索 8 个成功恢复的节点。')+'关闭初筛后按原局顺序取样，优先覆盖每局。胜局二筛和最终解读仍使用 AI。';
+  };
   el('studio-deck-sources').addEventListener('change',controls);
   el('studio-cancel').onclick=async()=>{if(state.job)try{await api('/api/jobs/'+state.job.id,{method:'DELETE'});}catch(e){notify(e.message,true);}};
   el('review-nodes').onclick=e=>{const b=e.target.closest('[data-review-line]');if(b)openNode(Number(b.dataset.reviewLine));};

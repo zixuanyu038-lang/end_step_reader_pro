@@ -5,7 +5,7 @@ const {promisify}=require('node:util');
 const {createInterface}=require('node:readline');
 const execute=promisify(execFile);
 class ForgeClient {
-  constructor({runtimeDir=path.join(process.env.LOCALAPPDATA||process.env.HOME||'.','EndstepForgeProbe'),dataDir=path.join(__dirname,'.endstep-data'),timeoutMs=180000}={}){
+  constructor({runtimeDir=process.env.ENDSTEP_FORGE_RUNTIME||path.join(process.env.LOCALAPPDATA||process.env.HOME||'.','EndstepForgeProbe'),dataDir=path.join(__dirname,'.endstep-data'),timeoutMs=180000}={}){
     this.runtimeDir=runtimeDir;this.dataDir=dataDir;this.timeoutMs=timeoutMs;this.sequence=0;this.pending=new Map();this.queue=Promise.resolve();this.closed=false;
     this.java=path.join(runtimeDir,'jdk','jdk-17.0.20.1+1','bin','java.exe');
     this.javac=path.join(runtimeDir,'jdk','jdk-17.0.20.1+1','bin','javac.exe');
