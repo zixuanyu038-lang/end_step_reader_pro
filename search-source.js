@@ -22,10 +22,13 @@ function sourceAt(text,line){
     if(x.line<startLine)continue;
     if(state){
       for(const p of state.players){if(initialDeckSizes[p.id]==null&&p.librarySize!=null)initialDeckSizes[p.id]=p.librarySize+(p.handSize||0)+['battlefield','graveyard','exile'].reduce((n,z)=>n+(p[z]||[]).filter(c=>!c.isToken).length,0);}
-      for(const original of cards(state).concat(state.pendingAction?.cardOptions||[]))if(original.id!=null&&original.name&&original.name!=='Hidden card'&&!original.faceDown&&original.zone!=='Player'&&!original.types?.includes('Player')&&!(original.zone==='Command'&&!original.isCommander&&!original.isCompanion)){
+      const visible=cards(state),visibleIds=new Set(visible.filter(c=>!c.faceDown&&c.name!=='Hidden card').map(c=>String(c.id)));
+      const options=state.pendingAction?.contextType==='sideboard'?[]:(state.pendingAction?.cardOptions||[]).filter(c=>!c.stackKind&&!visibleIds.has(String(c.id))&&!known.has(String(c.id)));
+      for(const original of visible.concat(options))if(original.id!=null&&original.name&&original.name!=='Hidden card'&&!original.faceDown&&original.zone!=='Player'&&!original.types?.includes('Player')&&!(original.zone==='Command'&&!original.isCommander&&!original.isCompanion)){
         const c=clone(original);if(c.ownerId==null&&c.ownerName)c.ownerId=state.players.find(p=>p.name===c.ownerName)?.id;
         if(c.ownerId==null&&state.pendingAction?.cardOptions?.some(o=>o.id===c.id))c.ownerId=String(source.header.seat);
-        known.set(String(c.id),c);if(!c.isTransformed&&!c.isBackFace)faces.set(String(c.id),c.name.split(' // ')[0]);
+        const front=c.isTransformed||c.isBackFace?c.alternateFaceName:c.name;
+        known.set(String(c.id),c);if(front)faces.set(String(c.id),front.split(' // ')[0]);
       }
     }
     if(row.k==='action'&&row.action.type==='ARRANGE_CARDS'&&(state?.pendingAction?.contextType==='library_top'||state?.pendingAction?.sourceCardName==='Brainstorm')){

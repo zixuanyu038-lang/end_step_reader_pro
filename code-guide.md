@@ -232,8 +232,8 @@ flowchart TD
 建立双方整盘牌表及分局换备后的组成。
 
 - `scanMatch()`：按实体统计公开牌，汇总跨局数量约束，提取录制完整牌表和 `SIDEBOARD_SUBMIT`。
-- `fixDeck()`：让推定列表满足观察数量和总数，记录修正。
-- `coverGlobalFacts()`：核对参考列表能否覆盖整盘事实，处理推定灵活位。
+- `fixDeck()`：按录制张数增减主牌，缩减时保留整盘已公开的最低数量，并记录修正。
+- `coverGlobalFacts()`：补齐整盘公开牌的最低数量，优先用这些牌补足参考列表缺少的主牌位置。
 - `prepareMatchDecks()`：优先用已录制己方列表，其余通过牌表服务；将双方完整主备、先后手与约束交给换备 AI。
 - 内部换备应用/校验：核对实体与张数，形成每局固定列表，己方实际换备与 AI 建议分别保存。
 
@@ -253,7 +253,7 @@ flowchart TD
 ### [deck-catalog.js](deck-catalog.js)
 
 - `cards()`、`normalizeDeck()`：合并实体数量，核对构筑主备牌、日期、MTGO来源与哈希，按组成生成 ID。
-- `rankCandidates()`：按格式、起始主牌数、日期过滤；对已观察牌按稀有度和数量覆盖评分，未观察牌不扣分。
+- `rankCandidates()`：按赛制和日期过滤。整盘参考主牌最多相差 3 张，评分以已观察牌的稀有度和数量覆盖为主，并对张数差距扣分。
 - `DeckCatalog.load()`、`find()`：校验并合并内置/本机快照，去重后返回有限候选。
 - `syncCatalog()`：固定上游仓库和提交，读取月份目录、下载有限赛事文件，校验 Git blob 及 SHA-256，原子写入快照；没有有效数据时保留原文件。
 - CLI入口：`npm run update:decks` 更新私有数据目录；维护者可用 `--output` 更新发布快照。

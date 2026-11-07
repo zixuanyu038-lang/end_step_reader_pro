@@ -1,6 +1,8 @@
 'use strict';
 const fs=require('node:fs/promises'),path=require('node:path'),crypto=require('node:crypto');
+const {version}=require('./package.json');
 const REPOSITORY='modometa/modometa-mtgo-data',API='https://api.github.com/repos/'+REPOSITORY;
+const MATCH_REFERENCE_SIZE_TOLERANCE=3;
 const digest=value=>crypto.createHash('sha256').update(typeof value==='string'?value:JSON.stringify(value)).digest('hex');
 const name=value=>String(value||'').trim().replace(/\s+/g,' ').replace(/’/g,"'");
 function cards(rows){
@@ -16,16 +18,17 @@ function normalizeDeck(deck){
 }
 function rankCandidates(decks,facts,{format='Legacy',initialSize=null,global=true,limit=8,asOf=null}={}){
   if(facts.length<3)return[];
-  const pool=decks.filter(d=>d.format.toLowerCase()===format.toLowerCase()&&(!initialSize||d.main.reduce((n,c)=>n+c.count,0)===initialSize)&&(!asOf||d.date<=asOf));
-  const frequency=new Map();for(const d of pool)for(const c of d.main.concat(d.sideboard))frequency.set(c.name,(frequency.get(c.name)||0)+1);
+  const pool=decks.filter(d=>d.format.toLowerCase()===format.toLowerCase()&&(!asOf||d.date<=asOf)).map(deck=>({deck,sizeDelta:initialSize?Math.abs(deck.main.reduce((n,c)=>n+c.count,0)-initialSize):0}))
+    .filter(({sizeDelta})=>sizeDelta<=(global?MATCH_REFERENCE_SIZE_TOLERANCE:0));
+  const frequency=new Map();for(const {deck} of pool)for(const c of deck.main.concat(deck.sideboard))frequency.set(c.name,(frequency.get(c.name)||0)+1);
   const weighted=facts.map(c=>({...c,name:name(c.name),weight:1+Math.log(1+pool.length/((frequency.get(name(c.name))||0)+1))}));
   const denominator=weighted.reduce((n,c)=>n+c.weight*c.count,0);
-  return pool.map(deck=>{
+  return pool.map(({deck,sizeDelta})=>{
     const counts=new Map();for(const c of deck.main.concat(global?deck.sideboard:[]))counts.set(c.name,(counts.get(c.name)||0)+c.count);
     const missing=weighted.filter(c=>(counts.get(c.name)||0)<c.count).map(c=>({name:c.name,count:c.count-(counts.get(c.name)||0)}));
     const coverage=weighted.reduce((n,c)=>n+c.weight*Math.min(c.count,counts.get(c.name)||0),0)/denominator;
     // Unseen cards are unknown, never negative evidence against a candidate.
-    return{deck,coverage,missing,score:coverage+(missing.length===0?.01:0)};
+    return{deck,coverage,missing,score:coverage+(missing.length===0?.01:0)-.02*sizeDelta};
   }).filter(c=>c.coverage>=.7).sort((a,b)=>b.score-a.score||b.deck.date.localeCompare(a.deck.date)||a.deck.id.localeCompare(b.deck.id)).slice(0,limit);
 }
 class DeckCatalog{
@@ -43,7 +46,7 @@ class DeckCatalog{
 async function syncCatalog({output=path.join(__dirname,'.endstep-data','deck-catalog.json'),format='Legacy',maxFiles=20,months=2,now=new Date(),fetchImpl=fetch,signal,onProgress=()=>{}}={}){
   maxFiles=Math.max(1,Math.min(40,maxFiles));months=Math.max(1,Math.min(6,months));
   const json=async url=>{
-    const response=await fetchImpl(url,{headers:{'User-Agent':'Endstep-Studio/0.4.1','Accept':'application/vnd.github+json'},signal:signal?AbortSignal.any([signal,AbortSignal.timeout(15000)]):AbortSignal.timeout(15000)});
+    const response=await fetchImpl(url,{headers:{'User-Agent':'Endstep-Studio/'+version,'Accept':'application/vnd.github+json'},signal:signal?AbortSignal.any([signal,AbortSignal.timeout(15000)]):AbortSignal.timeout(15000)});
     if(!response.ok)throw Error('牌表库同步 HTTP '+response.status+(response.status===403||response.status===429?'（可能达到 GitHub 匿名请求限额，请稍后更新）':''));
     const body=await response.text();if(Buffer.byteLength(body)>8*1024*1024)throw Error('牌表库响应过大。');return JSON.parse(body);
   };
@@ -76,4 +79,4 @@ async function syncCatalog({output=path.join(__dirname,'.endstep-data','deck-cat
   return{output,decks:decks.length,sourceFiles:selected.length,failedFiles:errors.length,revision};
 }
 if(require.main===module){const outputIndex=process.argv.indexOf('--output'),output=outputIndex>=0?path.resolve(process.argv[outputIndex+1]):undefined;syncCatalog({output,onProgress:message=>console.log(message)}).then(result=>console.log(JSON.stringify(result,null,2))).catch(error=>{console.error(error.message);process.exitCode=1;});}
-module.exports={DeckCatalog,rankCandidates,syncCatalog,normalizeDeck};
+module.exports={DeckCatalog,rankCandidates,syncCatalog,normalizeDeck,MATCH_REFERENCE_SIZE_TOLERANCE};

@@ -5,6 +5,7 @@ const {CodexClient}=require('./codex-client');
 const {createModelQueue}=require('./model-queue');
 const {ForgeClient}=require('./forge-client'),{DeckService}=require('./deck-service');
 const {runForgeReview}=require('./search-review'),{runForgeBranch}=require('./search-branch'),SearchProtocol=require('./search-protocol');
+const {version}=require('./package.json');
 function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),client=null,forgeClient=null,initialReplay=null,reviewBudget={},reviewNodeLimit=8,runners={}}={}){
   const replays=new Map(),jobs=new Map(),session=crypto.randomBytes(32).toString('hex');let currentId=null;
   const runtime=path.join(dataDir,'runtime');const codex=client||new CodexClient({cwd:runtime});
@@ -68,7 +69,7 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
       if(url.pathname.startsWith('/api/')){
         if(!req.headers.cookie?.split(';').some(c=>c.trim()==='endstep_session='+session))return apiError(res,401,'请从应用首页打开。');
         if(!['GET','HEAD'].includes(req.method)&&((req.headers.origin&&req.headers.origin!=='http://'+host)||req.headers['x-endstep-request']!=='1'))return apiError(res,403,'请求来源无效。');
-        if(req.method==='GET'&&url.pathname==='/api/health'){try{return json(res,{...(await codex.status()),forge:await forge.status(),version:'0.4.1',mode:'forge-search'});}catch(e){return json(res,{connected:false,loggedIn:false,error:e.message,mode:'connected'});}}
+        if(req.method==='GET'&&url.pathname==='/api/health'){try{return json(res,{...(await codex.status()),forge:await forge.status(),version,mode:'forge-search'});}catch(e){return json(res,{connected:false,loggedIn:false,error:e.message,mode:'connected'});}}
         if(req.method==='GET'&&url.pathname==='/api/current'){const r=replays.get(currentId);return json(res,r?{id:r.id,filename:r.filename,jsonl:r.model.sourceText,review:r.review,evidence:r.searchEvidence||[],deckProfiles:r.matchDecks?{byGame:r.matchDecks.byGame,sideboardPlans:r.matchDecks.sideboardPlans,scope:r.matchDecks.scope}:null,jobs:[...jobs.values()].filter(j=>j.replayId===r.id).map(snapshot)}:null);}
         if(req.method==='POST'&&url.pathname==='/api/replays'){const b=await body(req);if(typeof b.jsonl!=='string'||typeof b.filename!=='string')throw Error('回放输入格式无效。');const r=await register(b.jsonl,b.filename);return json(res,{id:r.id,review:r.review,evidence:r.searchEvidence||[],deckProfiles:r.matchDecks?{byGame:r.matchDecks.byGame,sideboardPlans:r.matchDecks.sideboardPlans,scope:r.matchDecks.scope}:null});}
         if(req.method==='POST'&&url.pathname==='/api/jobs'){

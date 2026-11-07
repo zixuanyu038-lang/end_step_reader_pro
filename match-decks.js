@@ -14,7 +14,9 @@ function scanMatch(text){
   function remember(c,owner){
     if(c.id==null||!c.name||c.name==='Hidden card'||c.faceDown||c.isToken||c.isCopyOfRealCard||c.zone==='Player'||c.types?.includes('Player')||c.zone==='Command'&&!c.isCommander&&!c.isCompanion)return;
     const id=String(owner??c.ownerId);if(!['0','1'].includes(id))return;
-    const key=game+':'+id+':'+c.id;if(!c.isTransformed&&!c.isBackFace)faces.set(key,c.name.split(' // ')[0]);
+    const key=game+':'+id+':'+c.id;
+    const front=c.isTransformed||c.isBackFace?c.alternateFaceName:c.name;
+    if(front)faces.set(key,front.split(' // ')[0]);
     const name=canonicalName(faces.get(key)||c.name.split(' // ')[0]);
     const g=current();if(!g.players.has(id))g.players.set(id,new Map());g.players.get(id).set(String(c.id),{...c,name,ownerId:id});
   }
@@ -30,7 +32,10 @@ function scanMatch(text){
         for(const c of p.hand||[])if(String(p.id)===viewer||!c.faceDown)remember(c,p.id);
       }
       for(const stack of state.stack||[])if(stack.sourceCard)remember(stack.sourceCard);
-      for(const c of state.pendingAction?.cardOptions||[])remember(c,c.ownerId??state.players.find(p=>p.name===c.ownerName)?.id??viewer);
+      if(state.pendingAction?.contextType!=='sideboard')for(const c of state.pendingAction?.cardOptions||[]){
+        const owner=String(c.ownerId??state.players.find(p=>p.name===c.ownerName)?.id??viewer);
+        if(!c.stackKind&&!current().players.get(owner)?.has(String(c.id)))remember(c,owner);
+      }
     }
     if(r.k==='action'&&r.action.type==='SIDEBOARD_SUBMIT'&&state.pendingAction?.contextType==='sideboard'){
       const options=state.pendingAction.cardOptions||[],mainCount=state.pendingAction.sideboardState?.mainCount;
@@ -54,32 +59,50 @@ function scanMatch(text){
   }
   return{header,games,recorded,global,scope:'entire-replay-visible-information; hindsight deck reconstruction; no future draw order'};
 }
-function fixDeck(base,observed,size,catalog){
+function fixDeck(base,observed,size,catalog,matchObserved=observed){
   const pool=mapCounts(base.main),side=mapCounts(base.sideboard),required=mapCounts(observed),adjustments=[...(base.adjustments||[])];
-  function removeSpare(preferLand){
-    const spare=[...pool].filter(([name,n])=>n>(required.get(name)||0));
-    if(!spare.length)throw Error('固定牌表无法容纳整局公开牌。');
+  const matchMinimum=mapCounts(matchObserved);
+  function removeSpare(preferLand,moveToSideboard=false){
+    const spare=[...pool].filter(([name,n])=>n>(required.get(name)||0)&&(moveToSideboard||n+(side.get(name)||0)>(matchMinimum.get(name)||0)));
+    if(!spare.length)return null;
     spare.sort((a,b)=>Number(!!catalog.get(b[0])?.land===preferLand)-Number(!!catalog.get(a[0])?.land===preferLand)||b[1]-a[1]||a[0].localeCompare(b[0]));
     const name=spare[0][0];pool.set(name,pool.get(name)-1);return name;
   }
   for(const [name,n] of required)while((pool.get(name)||0)<n){
     if(!catalog.get(name)?.found)throw Error('Forge 没有这张已公开的牌：'+name);
-    const removed=removeSpare(!!catalog.get(name)?.land);pool.set(name,(pool.get(name)||0)+1);
-    const fromSideboard=(side.get(name)||0)>0;if(fromSideboard){side.set(name,side.get(name)-1);side.set(removed,(side.get(removed)||0)+1);}
-    adjustments.push({removed,added:name,basis:fromSideboard?'whole-game public evidence; assumed sideboard swap':'whole-game public evidence; inferred list correction'});
+    const fromSideboard=(side.get(name)||0)>0;
+    const removed=fromSideboard||total(pool)>=size?removeSpare(!!catalog.get(name)?.land,fromSideboard):null;
+    if(!removed&&total(pool)>=size)throw Error('固定牌表无法容纳整局公开牌。');
+    pool.set(name,(pool.get(name)||0)+1);
+    if(fromSideboard){side.set(name,side.get(name)-1);if(removed)side.set(removed,(side.get(removed)||0)+1);}
+    adjustments.push({removed,added:name,basis:fromSideboard?'whole-game public evidence; moved from reference sideboard':'whole-game public evidence; inferred list correction'});
   }
-  while(total(pool)>size){const removed=removeSpare(false);adjustments.push({removed,added:null,basis:'recorded starting main-deck count'});}
-  while(total(pool)<size){const added=base.main.find(c=>!required.has(c.name))?.name;if(!added)throw Error('无法恢复固定主牌张数。');pool.set(added,(pool.get(added)||0)+1);adjustments.push({removed:null,added,basis:'recorded starting main-deck count; hypothetical slot'});}
+  while(total(pool)>size){
+    const removed=removeSpare(false);
+    if(!removed)throw Error('无法在保留整盘公开牌的前提下缩减主牌至 '+size+' 张。');
+    adjustments.push({removed,added:null,basis:'recorded starting main-deck count'});
+  }
+  while(total(pool)<size){
+    const available=[...pool.keys()].filter(name=>pool.get(name)>0&&((pool.get(name)||0)+(side.get(name)||0)<4||/^Basic\s+Land\b/.test(catalog.get(name)?.type||'')));
+    available.sort((a,b)=>Number(matchMinimum.has(a))-Number(matchMinimum.has(b))||Number(!!catalog.get(b)?.land)-Number(!!catalog.get(a)?.land));
+    const added=available[0];if(!added)throw Error('无法恢复固定主牌张数。');
+    pool.set(added,pool.get(added)+1);adjustments.push({removed:null,added,basis:'recorded starting main-deck count; hypothetical slot'});
+  }
   if(adjustments.length>Math.ceil(size*.2))throw Error('相近牌表与整局公开信息差异过大。');
   return{...base,main:[...pool].filter(([,n])=>n>0).map(([name,count])=>({name,count})),sideboard:[...side].filter(([,n])=>n>0).map(([name,count])=>({name,count})),adjustments,fixedForGame:true,deckInformationScope:'entire replay visible information',hypothesisId:hash({pool:[...pool],side:[...side],source:base.sha256})};
 }
-function coverGlobalFacts(base,observed,catalog){
+function coverGlobalFacts(base,observed,catalog,size=base.main.reduce((n,c)=>n+c.count,0)){
   const main=mapCounts(base.main),side=mapCounts(base.sideboard),minimum=mapCounts(observed),adjustments=[...(base.adjustments||[])];
   for(const [name,required] of minimum)while((main.get(name)||0)+(side.get(name)||0)<required){
     const zone=(main.get(name)||0)>=(side.get(name)||0)?main:side;
+    if(zone===main&&total(main)<size){
+      main.set(name,(main.get(name)||0)+1);
+      adjustments.push({removed:null,added:name,zone:'main',basis:'recorded starting main-deck count; whole-replay public evidence'});
+      continue;
+    }
     const candidates=[...zone].filter(([card,n])=>n>0&&(main.get(card)||0)+(side.get(card)||0)>(minimum.get(card)||0));
     candidates.sort((a,b)=>Number(!!catalog.get(b[0])?.land===!!catalog.get(name)?.land)-Number(!!catalog.get(a[0])?.land===!!catalog.get(name)?.land)||b[1]-a[1]||a[0].localeCompare(b[0]));
-    if(!candidates.length)throw Error('相近牌表的75张牌无法容纳整盘公开信息。');
+    if(!candidates.length)throw Error('相近牌表无法容纳整盘公开信息。');
     const removed=candidates[0][0];zone.set(removed,zone.get(removed)-1);zone.set(name,(zone.get(name)||0)+1);
     adjustments.push({removed,added:name,zone:zone===main?'main':'sideboard',basis:'whole-replay public minimum exceeds published reference count; inferred flex-slot correction'});
   }
@@ -98,7 +121,12 @@ async function prepareMatchDecks({model,deckService,forge,ask,signal,onProgress=
   const meta=await forge.request({command:'catalog',names},{signal}),catalog=new Map(meta.cards.map(c=>[c.name,c]));
   const missing=meta.cards.filter(c=>!c.found);if(missing.length)throw Error('Forge 数据库缺少牌面：'+missing.map(c=>c.name).join('；'));
   const first=[...scanned.games.values()][0];
-  const fixedBases=bases.map((base,i)=>fixDeck(coverGlobalFacts(base,scanned.global[i].cards,catalog),counts([...(first.players.get(String(i))?.values()||[])].map(c=>c.name)),first.initialDeckSizes[String(i)]||base.main.reduce((n,c)=>n+c.count,0),catalog));
+  const fixedBases=bases.map((base,i)=>{
+    const matchObserved=scanned.global[i].cards;
+    const firstObserved=counts([...(first.players.get(String(i))?.values()||[])].map(c=>c.name));
+    const size=first.initialDeckSizes[String(i)]||base.main.reduce((n,c)=>n+c.count,0);
+    return fixDeck(coverGlobalFacts(base,matchObserved,catalog,size),firstObserved,size,catalog,matchObserved);
+  });
   const later=[...scanned.games.values()].filter(g=>g.game>first.game);let plans=[];
   function applyPlan(base,plan){
     const main=mapCounts(base.main),side=mapCounts(base.sideboard);

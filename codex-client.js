@@ -2,6 +2,7 @@
 const {spawn}=require('node:child_process');
 const {createInterface}=require('node:readline');
 const {EventEmitter}=require('node:events');
+const {version}=require('./package.json');
 const redact=value=>String(value??'').replace(/sk-[A-Za-z0-9_-]+/g,'[redacted]').replace(/Bearer\s+[^\s"']+/gi,'Bearer [redacted]').replace(/([?&](?:key|token|access_token|api_key)=)[^\s&#"']+/gi,'$1[redacted]').slice(0,2000);
 function errorDetails(params){
   const error=params.error||{},info=error.codexErrorInfo??params.codexErrorInfo??null;
@@ -25,14 +26,14 @@ class CodexClient extends EventEmitter{
     const args=['app-server','--listen','stdio://'];
     // A separate provider ID is required: this CLI can keep the built-in OpenAI
     // WebSocket route even when model_providers.openai.supports_websockets=false.
-    if(forceHttp||this.transport==='http')args.push('-c','model_provider="endstep_http"','-c','model_providers.endstep_http={name="OpenAI HTTP (Endstep)",wire_api="responses",requires_openai_auth=true,supports_websockets=false}');
+    if(forceHttp||this.transport==='http')args.push('-c','model_provider="endstep_http"','-c','model_providers.endstep_http={name="OpenAI HTTP (Endstep)",wire_api="responses",requires_openai_auth=true,supports_websockets=false,supports_standalone_web_search=true}');
     const child=spawn(this.binary,args,{cwd:this.cwd,windowsHide:true,stdio:['pipe','pipe','pipe']});this.process=child;
     this.process.stdin.on('error',()=>{});
     createInterface({input:this.process.stdout}).on('line',line=>{try{this.receive(JSON.parse(line));}catch{}});
     this.process.stderr.on('data',()=>{}); // Never forward raw diagnostics, config, or credentials to the browser.
     child.once('error',e=>{if(this.process===child)this.fail(new Error('无法启动 Codex：'+e.message));});
     child.once('exit',()=>{if(this.process===child)this.fail(new Error('Codex 连接已关闭，请重试。'));});
-    await this.request('initialize',{clientInfo:{name:'endstep_studio',title:'Endstep Studio',version:'0.4.1'},capabilities:{experimentalApi:true}},30000);
+    await this.request('initialize',{clientInfo:{name:'endstep_studio',title:'Endstep Studio',version},capabilities:{experimentalApi:true}},30000);
     this.send({method:'initialized',params:{}});
     this.effectiveTransport=forceHttp||this.transport==='http'?'http-sse':'configured';
     if(this.transport==='stable'&&!forceHttp){
@@ -72,9 +73,13 @@ class CodexClient extends EventEmitter{
       if(run.retrying){run.retrying=false;run.retryWaitMs=(run.retryWaitMs||0)+Date.now()-run.retryStartedAt;run.onDiagnostic?.({at:Date.now(),event:'activity_resumed',threadId:p.threadId,method:message.method,itemType:p.item?.type||null});run.onProgress?.({phase:'resumed',message:'Codex 已恢复活动，正在继续当前任务…'});}
     }
     if(message.method==='item/agentMessage/delta'){run.text+=p.delta||'';run.onProgress?.({phase:'thinking',message:'Codex 正在分析对局…'});}
+    if(message.method==='item/completed'&&p.item?.type==='webSearch'){
+      run.webSearchCount=(run.webSearchCount||0)+1;
+      run.onDiagnostic?.({at:Date.now(),event:'web_search_completed',threadId:p.threadId});
+    }
     if(message.method==='item/completed'&&p.item?.type==='agentMessage'){run.messages.push(p.item.text||'');}
     if(message.method==='turn/completed'){
-      run.onDiagnostic?.({at:Date.now(),event:'completed',threadId:p.threadId,status:p.turn?.status,elapsedMs:Date.now()-(run.startedAt||Date.now()),retryCount:run.retryCount||0,retryWaitMs:run.retryWaitMs||0});
+      run.onDiagnostic?.({at:Date.now(),event:'completed',threadId:p.threadId,status:p.turn?.status,elapsedMs:Date.now()-(run.startedAt||Date.now()),retryCount:run.retryCount||0,retryWaitMs:run.retryWaitMs||0,webSearchCount:run.webSearchCount||0});
       this.turns.delete(p.threadId);clearTimeout(run.timer);run.signal?.removeEventListener('abort',run.abort);
       if(p.turn?.status!=='completed')run.reject(Error(p.turn?.error?.message||'Codex 未完成生成。'));
       else{try{const final=run.messages.at(-1)||run.text;run.resolve(JSON.parse(final));}catch{run.reject(Error('Codex 未返回符合协议的 JSON。'));}}

@@ -22,12 +22,39 @@ test('payment evidence retains exact colored mana and deduplicates last-known sa
  const text=paymentText({manaPaid:[{sourceName:'Island',color:'U'},{sourceName:'Plateau',color:'R'}],lifeCost:1,paidCards:[{kind:'Sacrificed',cards:[{id:3,name:'Flooded Strand'}]},{kind:'SacrificedLKI',cards:[{id:3,name:'Flooded Strand'}]}]});
  assert.match(text,/Island \{U\}/);assert.match(text,/Plateau \{R\}/);assert.equal(text.match(/牺牲 Flooded Strand/g).length,1);assert.match(text,/1 点生命/);
 });
+test('match deck scanning keeps the front face and ignores trigger ordering indices',()=>{
+ const front={id:90,name:'Tamiyo, Inquisitive Student',zone:'Battlefield'};
+ const back={...front,name:'Tamiyo, Seasoned Scholar',isTransformed:true,isBackFace:true,alternateFaceName:front.name};
+ const state=(card,options)=>({players:[{id:'1',librarySize:59,battlefield:[card]}],pendingAction:{cardOptions:options}});
+ const text=[{k:'header',seat:1},{k:'key',state:state(front,[{...front,id:0,stackKind:'TRIGGERED'}])},{k:'key',state:state(back,[{id:back.id,name:back.name,zone:back.zone}])}].map(row=>JSON.stringify(row)).join('\n');
+ assert.deepEqual(scanMatch(text).global[1].cards,[{name:front.name,count:1}]);
+});
 test('reference deck corrections preserve size and evidence; candidate bounds retain pass and recorded play',()=>{
  const catalog=new Map(['Island','Mountain','Expedition Map'].map(name=>[name,{found:true,land:name!=='Expedition Map'}]));
  const base={main:[{name:'Island',count:58},{name:'Expedition Map',count:1},{name:'Mountain',count:1}],sideboard:[],sha256:'source',verified:true};
  const corrected=coverGlobalFacts(base,[{name:'Expedition Map',count:2}],catalog),fixed=fixDeck(corrected,[{name:'Expedition Map',count:2}],60,catalog);assert.equal(fixed.main.reduce((n,c)=>n+c.count,0),60);assert.equal(fixed.main.find(c=>c.name==='Expedition Map').count,2);assert.equal(base.main.find(c=>c.name==='Expedition Map').count,1);assert.match(fixed.adjustments[0].basis,/inferred/);
  const actions=[{key:'a',actorId:1,kind:'cast',cardId:1,cardName:'A'},{key:'b',actorId:1,kind:'cast',cardId:2,cardName:'B'},{key:'pass',actorId:1,kind:'pass'}];const ranked=rankActions(actions,{players:[]},{observedCardId:2,width:2});assert.ok(ranked.some(a=>a.kind==='pass'));assert.ok(ranked.some(a=>a.cardId===2));
  assert.equal(originalSelection({rows:[{line:5,row:{k:'action',action:{type:'PLAY_CARD',cardId:2}}}],anchor:{line:5},baseline:{stack:[]}},actions).action.cardId,2);
+});
+test('a hypothetical extra slot respects main and sideboard copy counts',()=>{
+ const base={main:[{name:'Wasteland',count:3},{name:'Island',count:57}],sideboard:[{name:'Wasteland',count:1}],sha256:'source'};
+ const catalog=new Map([['Island',{type:'Basic Land — Island',land:true}],['Wasteland',{type:'Land',land:true}]]);
+ const fixed=fixDeck(base,[{name:'Island',count:2}],61,catalog);
+ assert.deepEqual(fixed.main,[{name:'Wasteland',count:3},{name:'Island',count:58}]);
+ assert.match(fixed.adjustments[0].basis,/hypothetical slot/);
+});
+test('widened references use observed extra cards and protect later-game evidence when trimming',()=>{
+ const base={main:[{name:'Island',count:55},{name:'Ponder',count:4},{name:'Force of Will',count:1}],sideboard:[],sha256:'source'};
+ const catalog=new Map([['Island',{type:'Basic Land — Island',land:true,found:true}],['Ponder',{found:true}],['Force of Will',{found:true}]]);
+ const matchObserved=[{name:'Ponder',count:4},{name:'Force of Will',count:4}];
+ const expanded=coverGlobalFacts(base,matchObserved,catalog,63);
+ assert.equal(expanded.main.find(c=>c.name==='Force of Will').count,4);
+ assert.equal(expanded.adjustments.length,3);
+ assert.ok(expanded.adjustments.every(c=>c.removed===null&&c.added==='Force of Will'));
+ const trimmed=fixDeck(expanded,[{name:'Ponder',count:1}],60,catalog,matchObserved);
+ assert.equal(trimmed.main.reduce((n,c)=>n+c.count,0),60);
+ assert.equal(trimmed.main.find(c=>c.name==='Ponder').count,4);
+ assert.equal(trimmed.main.find(c=>c.name==='Force of Will').count,4);
 });
 test('real source preserves turn draw/cast history, known top and global recorded sideboarding',{skip:!process.env.REPLAY_SAMPLE},()=>{
  let raw=fs.readFileSync(process.env.REPLAY_SAMPLE);if(raw[0]===31)raw=zlib.gunzipSync(raw);const text=raw.toString('utf8'),a=Source.sourceAt(text,604),b=Source.sourceAt(text,659);
