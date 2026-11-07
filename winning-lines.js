@@ -1,4 +1,5 @@
 'use strict';
+const {isDeepStrictEqual}=require('node:util');
 const Schema=require('./search-schema'),S=require('./studio-schema'),{originalSelection}=require('./tree-search');
 const won=(run,viewer)=>run.stopReason==='game_over'&&run.state.status==='COMPLETE'&&String(run.state.winnerId)===String(viewer);
 const summarize=run=>({stopReason:run.stopReason,winnerId:run.state.winnerId??null,turn:run.state.turnNumber,features:run.evaluation.features,actions:(run.executed||[]).slice(0,120)});
@@ -34,7 +35,7 @@ async function selectWinningLines({records,forge,ask,signal,onProgress=()=>{}}){
    if(chosen.keep&&!candidate)throw Error('AI选择了不存在的胜局。');
    record.result.quality={...chosen,candidateId:chosen.keep?chosen.candidateId:'',keep:!!chosen.keep};
    if(chosen.keep){const world=record.worlds.find(w=>w.id===candidate.worldId),run=await forge.request({command:'simulate',root:world.root,path:candidate.path,includeTrace:true,horizonTurns:100,maxChoices:2000,maxSteps:4000},{signal});
-    if(!won(run,record.source.header.seat)||(run.intentStatus?.blocked||[]).length||run.intentStatus?.completed!==run.intentStatus?.total||run.state.turnNumber!==candidate.turn||JSON.stringify(run.executed)!==JSON.stringify(candidate.executed))throw Error('筛选胜局未能稳定重放，未保留。');
+    if(!won(run,record.source.header.seat)||(run.intentStatus?.blocked||[]).length||run.intentStatus?.completed!==run.intentStatus?.total||run.state.turnNumber!==candidate.turn||!isDeepStrictEqual(run.executed,candidate.executed))throw Error('筛选胜局未能稳定重放，未保留。');
     record.result.representative={worldId:world.id,scenario:world.scenario,path:candidate.path,...run};
     const selected=(record.result.alternatives||[]).find(a=>a.action.key===candidate.path[0]?.key),original=record.result.original;
     record.result.selectedAlternative=selected||null;

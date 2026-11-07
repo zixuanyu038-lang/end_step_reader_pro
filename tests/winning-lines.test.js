@@ -20,7 +20,8 @@ test('adversarial UCT explores the opponent refutation instead of assuming a coo
 });
 test('an accepted winner is replayed and compared against the selected root, not a different best action',async()=>{
  const r=record();r.result.alternatives=[{action:{key:'candidate'},mean:5,worlds:[{worldIndex:0,mean:5}]}];r.result.original={mean:2,worlds:[{worldIndex:0,mean:2}]};
- const forge={async request(input){if(input.command==='expand')return{actions:[action('original',2)]};return{state:{...initial,turnNumber:8,status:'COMPLETE',winnerId:'1'},stopReason:'game_over',evaluation:{features:[]},intentStatus:{completed:0,total:0,blocked:[]},executed:[],trace:[]};}};
+ r.result.winningCandidates[0].executed=[{turn:8,cardName:'Lightning Bolt'}];
+ const forge={async request(input){if(input.command==='expand')return{actions:[action('original',2)]};return{state:{...initial,turnNumber:8,status:'COMPLETE',winnerId:'1'},stopReason:'game_over',evaluation:{features:[]},intentStatus:{completed:0,total:0,blocked:[]},executed:[{cardName:'Lightning Bolt',turn:8}],trace:[]};}};
  await selectWinningLines({records:[r],forge,ask:async()=>({selections:[{sourceLine:6,candidateId:'win',keep:true,reason:'Fixture comparison',risks:[],confidence:'medium'}]})});assert.equal(r.result.quality.keep,true);assert.equal(r.result.comparison.meanDifference,3);assert.equal(r.result.representative.worldId,'world');
 });
 test('AI can reject winning candidates without producing a retained replay',async()=>{

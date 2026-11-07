@@ -2,6 +2,7 @@
 const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),zlib=require('node:zlib');
 const R=require('../replay'),Source=require('../search-source'),{scanMatch,fixDeck,coverGlobalFacts}=require('../match-decks'),{difference,visibleState,paymentText,compileReplay}=require('../forge-replay'),{rankActions,originalSelection}=require('../tree-search');
 const {prepareMatchDecks}=require('../match-decks'),{readDeckPreferences}=require('../deck-service');
+const {buildWorld}=require('../hidden-worlds');
 test('engine projection patches preserve keyed identities through movement, removal and reordering',()=>{
  const a={players:[{id:'0',hand:[{id:1,name:'A'},{id:2,name:'B'}],battlefield:[]}],optional:true};
  const b={players:[{id:'0',hand:[{id:2,name:'B',tapped:false}],battlefield:[{id:1,name:'A'}]}]};
@@ -68,6 +69,27 @@ test('match preparation uses uploaded and searched references for their respecti
  assert.deepEqual(profile.byGame[1][1].main,[{name:'Lightning Bolt',count:1},{name:'Mountain',count:59}]);
  assert.equal(profile.byGame[1][1].sourceKind,'uploaded');
  assert.deepEqual(profile.byGame[1][1].adjustments,[]);
+});
+test('custom pressure moves only available copies into unknown hand slots',()=>{
+ const deck=main=>({main,sideboard:[],verified:true,fixedForGame:true});
+ const foe=deck([{name:'Brainstorm',count:2},{name:'Force of Will',count:2},{name:'Island',count:4}]);
+ const own=deck([{name:'Island',count:6}]);
+ const visible={id:10,name:'Brainstorm',ownerId:'0',controllerId:'0'};
+ const grave={id:11,name:'Force of Will',ownerId:'0',controllerId:'0'};
+ const source={header:{seat:1},known:[],historyCounters:[{},{}],baseline:{turnNumber:3,phase:'MAIN1',activePlayerId:'0',priorityPlayerId:'1',stack:[],players:[
+   {id:'0',name:'Opponent',life:20,librarySize:4,hand:[visible,{id:12,name:'Hidden card'},{id:13,name:'Hidden card'}],graveyard:[grave]},
+   {id:'1',name:'Player',life:20,librarySize:6,hand:[]}
+ ]}};
+ const catalog=new Map([['Brainstorm',{found:true}],['Force of Will',{found:true}]]),build=stressCards=>buildWorld(source,[foe,own],catalog,123,{stressCards});
+ const ordinary=build([]),pressure=build(['force of will','Brainstorm']);
+ assert.deepEqual(pressure.scenario.cards,['Force of Will','Brainstorm']);
+ assert.deepEqual(pressure.hiddenHands[0].cards.slice(1).sort(),['Brainstorm','Force of Will']);
+ assert.equal(pressure.hiddenHands[0].cards[0],'Brainstorm');
+ assert.deepEqual(pressure.libraries[1],ordinary.libraries[1]);
+ const inventory=world=>world.hiddenHands[0].cards.concat(world.libraries[0].cards.map(c=>c.name)).sort();
+ assert.deepEqual(inventory(pressure),inventory(ordinary));
+ assert.throws(()=>build(['Force of Will','Force of Will']),/没有足够/);
+ assert.throws(()=>build(['Island','Island','Island']),/未知手牌位/);
 });
 test('real source preserves turn draw/cast history, known top and global recorded sideboarding',{skip:!process.env.REPLAY_SAMPLE},()=>{
  let raw=fs.readFileSync(process.env.REPLAY_SAMPLE);if(raw[0]===31)raw=zlib.gunzipSync(raw);const text=raw.toString('utf8'),a=Source.sourceAt(text,604),b=Source.sourceAt(text,659);

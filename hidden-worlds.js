@@ -10,6 +10,24 @@ const counts=m=>[...m].filter(([,n])=>n>0).map(([name,count])=>({name,count}));
 function random(seed){let n=seed>>>0;return()=>{n+=0x6D2B79F5;let t=n;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return((t^t>>>14)>>>0)/4294967296;};}
 function shuffle(list,rng){for(let i=list.length-1;i>0;i--){const j=Math.floor(rng()*(i+1));[list[i],list[j]]=[list[j],list[i]];}return list;}
 function reject(message){throw Object.assign(Error(message),{code:'unsupported_root'});}
+function applyCustomPressure(requested,slots,hand,library,locked){
+  if(requested.length>slots.length)throw Error(`对手只有 ${slots.length} 个未知手牌位，你指定了 ${requested.length} 张牌。`);
+  const key=name=>canonicalName(name.split(' // ')[0]).toLowerCase();
+  const pending=[],free=slots.slice(),applied=Array(requested.length);
+  for(const [index,name] of requested.entries()){
+    const slot=free.findIndex(i=>key(hand[i].name)===key(name));
+    if(slot<0)pending.push({index,name});
+    else applied[index]=hand[free.splice(slot,1)[0]].name;
+  }
+  for(const {index,name} of pending){
+    const card=library.find(c=>!locked.has(String(c.id))&&key(c.name)===key(name));
+    if(!card)throw Error(`对手可分配的主牌中没有足够的 ${name}。请核对当前局的牌表和已知区域。`);
+    const slot=free.shift();
+    applied[index]=card.name;
+    [hand[slot].name,card.name]=[card.name,hand[slot].name];
+  }
+  return applied;
+}
 function supportedStackTrigger(entry){
   return entry.isTrigger===true&&entry.sourceCard?.name==='Acererak the Archlich'&&entry.sourceCardZone==='Battlefield'
     &&entry.abilityDescription?.startsWith('When Acererak the Archlich enters,')&&!entry.optionalTrigger&&!entry.targets?.length;
@@ -39,7 +57,7 @@ function cardText(source,c){
   if(String(c.ownerId)!==String(c.controllerId))out.push('Owner:p'+c.ownerId);
   return out.join('|');
 }
-function buildWorld(source,decks,catalog,seed,{stressCard=null}={}){
+function buildWorld(source,decks,catalog,seed,{stressCard=null,stressCards=[]}={}){
   const state=source.baseline;
   if(state.players.length!==2)reject('目前只支持双人对局。');
   if(/COMBAT|ATTACK|BLOCK|CLEANUP/.test(state.phase))reject('当前节点处于战斗或清除步骤，工作台尚未支持恢复这一状态。');
@@ -53,7 +71,7 @@ function buildWorld(source,decks,catalog,seed,{stressCard=null}={}){
   if(state.isDay||state.isNight)reject('这个起点包含尚未核对恢复的昼夜状态。');
   if(source.activeUnrestoredEffects?.length)reject('该节点仍有需要恢复的持续效果：'+source.activeUnrestoredEffects.map(e=>e.cardName).join('；'));
   if(source.historyUncertainties?.length)reject(source.historyUncertainties.join('；'));
-  const stressRequested=stressCard;let stressApplied=false;
+  const stressRequested=stressCard;let stressApplied=false,customApplied=[];
   const rng=random(seed),assumptions=[],hands=[],libraries=[],adaptedDecks=[],lines=[];
   const aliases={END_STEP:'END_OF_TURN',BEGIN_COMBAT:'COMBAT_BEGIN',DECLARE_ATTACKERS:'COMBAT_DECLARE_ATTACKERS',DECLARE_BLOCKERS:'COMBAT_DECLARE_BLOCKERS',END_COMBAT:'COMBAT_END'};
   lines.push('turn='+state.turnNumber,'activeplayer=p'+state.activePlayerId,'activephase='+(aliases[state.phase]||state.phase));
@@ -104,6 +122,11 @@ function buildWorld(source,decks,catalog,seed,{stressCard=null}={}){
     let library=shuffle(reserved.concat(remaining.map(name=>({id:nextId++,name}))),rng);
     const top=source.knownTop?.[String(player.id)]||[];
     for(let n=top.length-1;n>=0;n--){const i=library.findIndex(c=>String(c.id)===String(top[n]));if(i<0)reject('已知牌库顶不在假设牌库中。');library.unshift(library.splice(i,1)[0]);}
+    if(stressCards.length&&String(player.id)!==String(source.header.seat)){
+      const slots=player.hand.flatMap((c,i)=>c.name==='Hidden card'||c.faceDown?[i]:[]);
+      const locked=new Set(top.concat(reserved.map(c=>c.id)).map(String));
+      customApplied=applyCustomPressure(stressCards,slots,hand,library,locked);
+    }
     if(library.length!==player.librarySize)reject('假设牌库长度与原节点不一致。');
     hands.push({playerId:String(player.id),cards:hand.map(c=>c.name),hiddenCount:player.hand.filter(c=>c.name==='Hidden card'||c.faceDown).length});
     libraries.push({playerId:String(player.id),cards:library,knownTop:top});
@@ -117,8 +140,9 @@ function buildWorld(source,decks,catalog,seed,{stressCard=null}={}){
     let sideId=1_800_000_000+index*1000;lines.push(prefix+'sideboard='+expand(side).map(name=>cardText(source,{id:sideId++,name,ownerId:player.id,controllerId:player.id})).join(';'));
   }
   const root={stateText:lines.join('\n')+'\n',seed,viewerId:Number(source.header.seat),names:state.players.map(p=>p.name),gameId:state.gameId,activePlayerId:Number(state.activePlayerId),priorityPlayerId:Number(state.priorityPlayerId),firstPriorityId:source.firstPriorityId,history:source.historyCounters,cardHistory:source.cardHistory,decks:adaptedDecks,stack:state.stack||[],spellHistory:source.spellHistory||[],tokens:state.players.flatMap(p=>ZONES.flatMap(z=>p[z]||[]).filter(c=>c.isToken&&c.name==='Thundertrap Trainer')),statuses:state.players.map(p=>({hasMonarch:!!p.hasMonarch,hasInitiative:!!p.hasInitiative,hasCitysBlessing:!!p.hasCitysBlessing,commandEffects:(p.commandZone||[]).filter(c=>!c.isCommander&&!c.isCompanion)}))};
-  const id=crypto.createHash('sha256').update(JSON.stringify({root,version:1})).digest('hex');
-  return{id,root,assumptions,hiddenHands:hands,libraries,sourceUrls:decks.map(d=>d.url),scenario:stressApplied?{kind:'targeted-interaction-stress',card:stressRequested,basis:'explicitly assumes one plausible interaction card from the fixed deck; not a probability sample'}:{kind:'deck-sampled-hidden-hand'}};
+  const scenario=customApplied.length?{kind:'custom-interaction-stress',cards:customApplied,basis:'Player-specified cards in the opponent’s hidden hand, from the fixed deck.'}:stressApplied?{kind:'targeted-interaction-stress',card:stressRequested,basis:'explicitly assumes one plausible interaction card from the fixed deck; not a probability sample'}:{kind:'deck-sampled-hidden-hand'};
+  const id=crypto.createHash('sha256').update(JSON.stringify({root,version:1,...(customApplied.length?{scenario}:{})})).digest('hex');
+  return{id,root,assumptions,hiddenHands:hands,libraries,sourceUrls:decks.map(d=>d.url),scenario};
 }
 function auditRoot(source,actual){
   const failures=[];

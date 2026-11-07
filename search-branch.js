@@ -2,7 +2,7 @@
 const fs=require('node:fs/promises'),path=require('node:path'),crypto=require('node:crypto');
 const Source=require('./search-source'),Schema=require('./search-schema'),S=require('./studio-schema');
 const {ensureMatchDecks,buildWorlds,compactEvidence}=require('./search-review');
-const {auditRoot}=require('./hidden-worlds'),{search}=require('./tree-search');
+const {auditRoot}=require('./hidden-worlds'),{search,originalSelection}=require('./tree-search');
 const {compileReplay,routeFromTrace,paymentText}=require('./forge-replay');
 const {selectWinningLines}=require('./winning-lines');
 function intentPrompt(source,finding,focus,inspection){
@@ -21,10 +21,10 @@ function planView(intent,preview,finding,viewerId='1'){
     manaAudit:{availableSources:finding?.manaAudit?.availableSources||[],availablePool:finding?.manaAudit?.availablePool||'起点法术力池见局面',spellCost:'由 Forge 按每个动作的实际费用执行',modifiers:finding?.manaAudit?.modifiers||[],paymentPlan:costs,remainingMana:'预演末节点：'+JSON.stringify(preview.state.players.find(p=>String(p.id)===String(viewerId))?.manaPool||{}),legal:feasible,uncertainties:intent.constraints},
     proposedLine,assumptionsNeeded:['手牌与未知库序使用固定假设；牌表与换备方案固定。',...intent.constraints],intentStatus:preview.intentStatus};
 }
-async function inspectBranchStart({source,profiles,forge,signal}){
+async function inspectBranchStart({source,profiles,forge,signal,stressCards=[]}){
   const prepared={decks:profiles.byGame[source.game],catalog:profiles.catalog};
-  if(!prepared.decks)throw Object.assign(Error('这局还没有可用的牌表。请先完成整盘复盘。'),{code:'branch_not_ready'});
-  const worlds=buildWorlds(source,prepared,3);
+  if(!prepared.decks)throw Object.assign(Error('这局还没有可用的牌表。请先准备对局。'),{code:'branch_not_ready'});
+  const worlds=buildWorlds(source,prepared,3,stressCards);
   const inspection=await forge.request({command:'expand',root:worlds[0].root},{signal});
   auditRoot(source,inspection.state);
   if(inspection.stopReason!=='decision')throw Object.assign(Error('Forge 未能恢复到可作决定的优先权节点。'),{code:'unsupported_root'});
@@ -34,7 +34,7 @@ async function runForgeBranch({job,replay,ask,progress,forge,deckService,profile
   const source=Source.sourceAt(replay.model.sourceText,job.sourceLine),finding=replay.review?.games.flatMap(g=>g.findings).find(f=>f.sourceLine===job.sourceLine);
   const profiles=await ensureMatchDecks({replay,profileDir,deckService,forge,signal:job.abort.signal,ask:(prompt,schema,options)=>ask(job,prompt,schema,options),onProgress:message=>progress(job,'decks',message)});
   progress(job,'restore','正在核对分支起点与固定的手牌、牌库假设…');
-  const {prepared,worlds,inspection}=await inspectBranchStart({source,profiles,forge,signal:job.abort.signal});
+  const {prepared,worlds,inspection}=await inspectBranchStart({source,profiles,forge,signal:job.abort.signal,stressCards:job.stressCards});
   progress(job,'intent','正在将你的描述提炼为玩法目标…');
   replay.intentPlans??=new Map();
   const intentKey=crypto.createHash('sha256').update(JSON.stringify({version:2,replayId:replay.id,line:source.anchor.line,focus,worlds:worlds.map(w=>w.id)})).digest('hex');
@@ -48,18 +48,45 @@ async function runForgeBranch({job,replay,ask,progress,forge,deckService,profile
   if(intent.goals.some(g=>g.targets.some(t=>t.playerId&&!['0','1'].includes(t.playerId))))throw Error('AI 提炼的目标引用了不存在的玩家。');
   if(!intent.supported){const plan={understoodIntent:intent.understoodIntent,feasible:false,issues:intent.issues,proposedLine:[],assumptionsNeeded:intent.constraints};return{plan,review:replay.review};}
   replay.intentPlans.set(intentKey,structuredClone(intent));
+  const previewRoot=worlds[0].root;
   for(const world of worlds)world.root={...world.root,intent};
   progress(job,'preview','正在用 Forge 尝试目标顺序、支付和对手响应…');
-  const preview=await forge.request({command:'simulate',root:worlds[0].root,path:[],includeTrace:true,horizonTurns:2,maxChoices:350,maxSteps:500},{signal:job.abort.signal});
+  const simulate=(root,path,includeTrace)=>forge.request({command:'simulate',root,path,includeTrace,horizonTurns:2,maxChoices:350,maxSteps:500},{signal:job.abort.signal});
+  const preview=await simulate(worlds[0].root,[],true);
   const plan=planView(intent,preview,finding,source.header.seat);job.result={plan,review:replay.review};
+  if(worlds[0].scenario.kind==='custom-interaction-stress'){
+    const summarize=run=>({stopReason:run.stopReason,turn:run.state.turnNumber,winnerId:run.state.winnerId??null,life:run.state.players.map(p=>({id:p.id,life:p.life}))});
+    const original=originalSelection(source,inspection.actions);
+    let originalPreview={unavailable:original.reason};
+    if(original.matched){
+      progress(job,'preview','正在同一压力世界预演原打法…');
+      try{originalPreview=summarize(await simulate(previewRoot,[original.action],false));}
+      catch(error){if(job.abort.signal.aborted)throw error;originalPreview={unavailable:error.message};}
+    }
+    plan.stressComparison={cards:worlds[0].scenario.cards,alternative:summarize(preview),original:originalPreview};
+  }
   await fs.writeFile(path.join(job.dir,'intent.json'),JSON.stringify({intent,preview},null,2));
   if(job.type==='plan')return job.result;
   progress(job,'search','正在比较满足玩法意图的候选分支…');let last=0;
   const result=await search({client:forge,source,worlds,signal:job.abort.signal,budget:{iterations:40,width:7,maxDepth:9},onProgress:p=>{
     if(Date.now()-last>1200||p.iteration===p.iterations){last=Date.now();progress(job,'search',`意图分支 · 世界 ${p.world}/${p.worlds} · 搜索 ${p.iteration}/${p.iterations}`);}
   }});
+  const searchSummary={worlds:worlds.length,simulated:result.simulated,winningCandidates:result.winningCandidates.length,elapsedMs:result.elapsedMs,
+    alternatives:result.alternatives.slice(0,4).map(candidate=>({label:candidate.action.label||candidate.action.cardName||'让过',mean:candidate.mean,visits:candidate.visits}))};
+  await fs.writeFile(path.join(job.dir,'search-candidates.json'),JSON.stringify({sourceLine:job.sourceLine,worlds,result,intent,plan},null,2));
+  if(job.type==='search')return{plan,searchSummary,review:replay.review};
+  return screenAndExport({job,replay,source,worlds,result,intent,plan,ask,progress,forge});
+}
+async function runBranchQuality({job,parent,replay,ask,progress,forge}){
+  const saved=JSON.parse(await fs.readFile(path.join(parent.dir,'search-candidates.json'),'utf8'));
+  if(saved.sourceLine!==parent.sourceLine||!saved.plan||!saved.intent||!saved.result?.winningCandidates?.length)throw Error('这次搜索没有可供二筛的胜局。');
+  const source=Source.sourceAt(replay.model.sourceText,parent.sourceLine);
+  job.result={plan:saved.plan,searchSummary:parent.result.searchSummary,review:replay.review};
+  const outcome=await screenAndExport({job,replay,source,ask,progress,forge,...saved});
+  return{...outcome,searchSummary:parent.result.searchSummary};
+}
+async function screenAndExport({job,replay,source,worlds,result,intent,plan,ask,progress,forge}){
   progress(job,'quality','正在先按胜负筛选，再由 AI 判断哪些胜局值得指导原局…');
-  await fs.writeFile(path.join(job.dir,'search-candidates.json'),JSON.stringify({sourceLine:job.sourceLine,worlds,result},null,2));
   await selectWinningLines({records:[{source,result,worlds,node:{sourceLine:job.sourceLine,question:intent.understoodIntent}}],forge,signal:job.abort.signal,ask:(prompt,schema)=>ask(job,prompt,schema),onProgress:message=>progress(job,'quality',message)});
   if(!result.quality.keep){await fs.writeFile(path.join(job.dir,'search.json'),JSON.stringify({worlds,result},null,2));return{plan,quality:result.quality,review:replay.review};}
   const world=worlds.find(w=>w.id===result.representative.worldId),run=result.representative;
@@ -74,4 +101,4 @@ async function runForgeBranch({job,replay,ask,progress,forge,deckService,profile
     quality:result.quality,verification:'Forge 判定获胜，固定世界重放通过；AI二筛认为值得用于原局指导。',validationLevel:'forge-executed-audited-root',complete:compiled.complete,stopReason:run.stopReason,intentStatus:run.intentStatus,hypotheticalWinnerId:run.state.winnerId??null,
     downloadUrl:'/api/jobs/'+job.id+'/replay',previewUrl:'/api/jobs/'+job.id+'/jsonl',evidence:[evidence],review:replay.review};
 }
-module.exports={runForgeBranch,inspectBranchStart,intentPrompt,planView};
+module.exports={runForgeBranch,runBranchQuality,inspectBranchStart,intentPrompt,planView};

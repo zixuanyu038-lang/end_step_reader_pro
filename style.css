@@ -68,3 +68,15 @@
 .branch-badge{display:inline-block;font-size:11px;color:var(--muted)}
 .branch-badge[data-branch-state="ready"]{color:var(--green)}
 .branch-badge[data-branch-state="unsupported"],.branch-badge[data-branch-state="unavailable"]{color:var(--red)}
+.studio-pressure{margin:16px 0;font-size:12px}
+.studio-pressure summary{cursor:pointer}
+.studio-pressure label{display:block;margin-top:10px}
+.studio-pressure p,.pressure-comparison p{margin:6px 0;color:var(--muted);line-height:1.7}
+#studio-stress-cards{width:100%;max-width:430px;padding:9px 11px;border:1px solid var(--line);background:var(--paper);font:inherit;line-height:1.6;resize:vertical}
+.pressure-comparison{margin:16px 0;padding:12px 0;border-top:1px solid var(--line);font-size:12px;overflow-wrap:anywhere}
+.pressure-comparison dl{display:grid;grid-template-columns:auto minmax(0,1fr);gap:5px 16px;margin:8px 0 0;line-height:1.7}
+.pressure-comparison dd{margin:0}
+.studio-stage-actions{display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;gap:8px}
+.studio-stage-actions>.import-button{min-height:39px;font-size:12px}
+.pressure-comparison ul{margin:8px 0 12px;padding-left:18px;line-height:1.7}
+@media(max-width:650px){.studio-heading{flex-wrap:wrap}.studio-stage-actions{justify-content:flex-start}}
