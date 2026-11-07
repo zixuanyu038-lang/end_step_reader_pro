@@ -19,6 +19,12 @@
 
 推荐阅读顺序：`studio-server.js → search-review.js → tree-search.js → forge/EngineWorker.java → winning-lines.js → forge-replay.js`。旧手动分支与账本已在导览中单独标出。
 
+## 0.4.7 更新
+
+Studio 打开时在后台检查 Forge 正式版。右上角「Forge 引擎」显示当前版本和上游状态，也可以重新检查。查询最多等待约 2.5 秒，网络不通时仍可使用已安装的本地引擎。
+
+手动更新时，从 Forge 发布页下载正式版的 `forge-installer-版本.tar.bz2`，把文件拖到 Studio 目录的 `更新Forge.cmd`。脚本会联网核对 SHA-256，解包到独立目录并用当前 Java 自检费用、目标、结算和堆叠恢复。验证通过后，等现有任务完成再重启 Studio。回退时在该目录运行 `更新Forge.cmd rollback`，下次启动会使用原配引擎。 [Forge 正式版下载](https://github.com/Card-Forge/forge/releases/latest)
+
 ## 0.4.6 更新
 
 - 整盘复盘可关闭 AI 初筛。关闭后按原局顺序取样，优先覆盖每局。牌表推断、胜局二筛和最终解读仍按需要使用模型。

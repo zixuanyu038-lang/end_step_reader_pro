@@ -1,5 +1,6 @@
 'use strict';
 const zlib=require('node:zlib'),crypto=require('node:crypto'),R=require('./replay');
+const {baseEngine}=require('./forge-runtime');
 const clone=x=>JSON.parse(JSON.stringify(x));
 const equal=(a,b)=>JSON.stringify(a)===JSON.stringify(b);
 function difference(before,after){
@@ -49,7 +50,7 @@ function compileReplay(source,run,{title='推荐分支',summary='',world,evidenc
   const complete=run.stopReason==='game_over'&&run.state.status==='COMPLETE';
   if(!complete&&run.state.status==='COMPLETE')throw Error('引擎终局标记不一致。');
   const header={...source.header,games:source.game,complete,result:complete&&run.state.winnerId!=null?(String(run.state.winnerId)===String(source.header.seat)?'win':'loss'):null,
-    branchMeta:{format:'endstep-forge-search-branch',version:1,title,summary,engine:'forge-2.0.15',validation:'forge-executed-with-audited-root',sourceSha256:source.sha256,anchorLine:source.anchor.line,selectedLine:source.anchor.selectedLine,
+    branchMeta:{format:'endstep-forge-search-branch',version:1,title,summary,engine:run.engine||evidence?.engine||baseEngine,validation:'forge-executed-with-audited-root',sourceSha256:source.sha256,anchorLine:source.anchor.line,selectedLine:source.anchor.selectedLine,
       hypothetical:true,scope:'single-game-continuation',complete,stop:{reason:run.stopReason,turn:run.state.turnNumber},worldId:world.id,seed:world.root.seed,scenario:world.scenario,
       deckInformationScope:source.descriptionSetup?'user-described position; confirmed hypothetical setup':'entire-replay-visible-information; retrospective inferred deck',
       ...(source.descriptionSetup?{sourceKind:'description',setupAssumptions:source.descriptionSetup}:{}),assumptions:world.assumptions,intent,quality,

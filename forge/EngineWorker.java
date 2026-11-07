@@ -559,7 +559,7 @@ public final class EngineWorker {
     public static void main(String[] args)throws Exception {
         PrintStream protocol=System.out;System.setOut(System.err);System.setProperty("java.awt.headless","true");
         GuiBase.setInterface(new GuiDesktop());FModel.initialize(null,null);
-        protocol.println("{\"ready\":true,\"engine\":\"forge-2.0.15\"}");protocol.flush();
+        protocol.println(JSON.toJson(Map.of("ready",true,"engine",args.length>0?args[0]:"unknown")));protocol.flush();
         BufferedReader input=new BufferedReader(new InputStreamReader(System.in,StandardCharsets.UTF_8));String line;
         while((line=input.readLine())!=null){
             JsonObject response=new JsonObject();

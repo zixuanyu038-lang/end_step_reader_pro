@@ -10,7 +10,17 @@
 <body>
   <header class="masthead">
     <a class="wordmark" href="#" id="home" aria-label="返回档案首页"><svg width="25" height="30" viewBox="0 0 25 30" fill="none" aria-hidden="true"><path d="M3 2h18v26H3zM7 7h10M7 12h10M7 17h6M7 22h10" stroke="currentColor" stroke-width="1.5"/><path d="M1 5v24h18" stroke="currentColor"/></svg><span>ENDSTEP<span class="wordmark-sub">对局档案</span></span></a>
-    <nav><span id="codex-connection" class="connection-status">连接 Codex…</span><button id="fullscreen" class="text-button">全屏 ⛶</button><button id="help" class="text-button">阅读说明 <span>↗</span></button><button class="import-button" id="open">导入回放 <span>＋</span></button></nav>
+    <nav><span id="codex-connection" class="connection-status">连接 Codex…</span>
+      <details id="forge-version" class="forge-version" hidden>
+        <summary id="forge-version-label">Forge 引擎</summary>
+        <div class="forge-version-content">
+          <p id="forge-version-message" role="status"></p>
+          <a id="forge-version-link" href="https://github.com/Card-Forge/forge/releases/latest" target="_blank" rel="noopener noreferrer">查看 Forge 正式版</a>
+          <button id="forge-version-check" class="text-button" type="button">重新检查</button>
+          <p>手动更新时，把官方 .tar.bz2 安装包拖到「更新Forge.cmd」。</p>
+        </div>
+      </details>
+      <button id="fullscreen" class="text-button">全屏 ⛶</button><button id="help" class="text-button">阅读说明 <span>↗</span></button><button class="import-button" id="open">导入回放 <span>＋</span></button></nav>
     <!-- Some native pickers hide unregistered extensions such as .esreplay.
          Show all files; openFile validates the gzip signature and replay contents. -->
     <input id="file" type="file" aria-label="选择 Endstep 回放或 JSONL 文件" hidden>
@@ -84,5 +94,6 @@
   <script src="branch.js"></script>
   <script src="app.js"></script>
   <script src="studio.js"></script>
+  <script src="forge-version-ui.js"></script>
 </body>
 </html>

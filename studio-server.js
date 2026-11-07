@@ -4,6 +4,8 @@ const R=require('./replay'),P=require('./studio-protocol'),Scenario=require('./s
 const {CodexClient}=require('./codex-client');
 const {createModelQueue}=require('./model-queue');
 const {ForgeClient}=require('./forge-client'),{DeckService,DeckLookupError,readDeckPreferences}=require('./deck-service');
+const {checkForgeRelease}=require('./forge-release');
+const {forgeCacheDir}=require('./forge-runtime');
 const {runForgeReview,prepareOnly,shortlistOnly,publicDeckProfile}=require('./search-review'),{runForgeBranch,runBranchQuality,inspectBranchStart}=require('./search-branch'),SearchProtocol=require('./search-protocol');
 const {readManualSideboard}=require('./match-decks');
 const Source=require('./search-source');
@@ -24,7 +26,8 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
   const forge=forgeClient||new ForgeClient({dataDir}),deckService=new DeckService({directory:path.join(dataDir,'decks')});
   const modelQueue=createModelQueue(2);
   const branchChecks=new WeakMap();
-  const profileDir=path.join(dataDir,'deck-profiles');
+  const engineCache=forgeCacheDir(forge,dataDir);
+  const profileDir=path.join(engineCache,'deck-profiles');
   const apiError=(res,status,message)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify({error:message}));};
   const json=(res,data)=>{res.writeHead(200,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'no-store'});res.end(JSON.stringify(data));};
   async function register(text,filename){
@@ -35,7 +38,7 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
     let prepared;
     try{const cached=JSON.parse(await fs.readFile(path.join(profileDir,id+'.json'),'utf8'));if(cached.version===3&&cached.replayId===id)prepared=cached;}catch{}
     try{
-      const cached=JSON.parse(await fs.readFile(path.join(dataDir,'forge-reviews',id+'.json'),'utf8'));
+      const cached=JSON.parse(await fs.readFile(path.join(engineCache,'forge-reviews',id+'.json'),'utf8'));
       if(cached.reviewVersion==='forge-search-v2-wins'&&(!prepared?.preparedAt||prepared.preparedAt<=(cached.completedAt||''))){
         replay.review=P.validateReview(cached.review,model);replay.searchEvidence=cached.evidence||[];
         if(cached.matchDecks)replay.matchDecks={...cached.matchDecks,catalog:new Map(cached.matchDecks.catalog)};
@@ -67,7 +70,7 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
     return result;
   }
   async function review(job,replay){
-    return (runners.review||runForgeReview)({job,replay,ask,progress,forge,deckService,cacheDir:path.join(dataDir,'forge-reviews'),budget:reviewBudget,nodeLimit:reviewNodeLimit});
+    return (runners.review||runForgeReview)({job,replay,ask,progress,forge,deckService,cacheDir:path.join(engineCache,'forge-reviews'),budget:reviewBudget,nodeLimit:reviewNodeLimit});
   }
   async function checkBranchStart(replay,line,{findEarlier=false}={}){
     const profiles=replay.matchDecks;
@@ -138,7 +141,7 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
     }finally{await save(job);}
   }
   async function body(req){let size=0;const chunks=[];for await(const chunk of req){size+=chunk.length;if(size>36*1024*1024)throw Error('请求体过大。');chunks.push(chunk);}return JSON.parse(Buffer.concat(chunks).toString('utf8'));}
-  const staticFiles=new Set(['index.html','style.css','replay.js','engine.js','branch.js','app.js','studio.js']);
+  const staticFiles=new Set(['index.html','style.css','replay.js','engine.js','branch.js','app.js','studio.js','forge-version-ui.js']);
   const server=http.createServer(async(req,res)=>{
     res.setHeader('Referrer-Policy','no-referrer');res.setHeader('X-Content-Type-Options','nosniff');res.setHeader('Cache-Control','no-store');
     try{
@@ -147,6 +150,7 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
       if(url.pathname.startsWith('/api/')){
         if(!req.headers.cookie?.split(';').some(c=>c.trim()==='endstep_session='+session))return apiError(res,401,'请从应用首页打开。');
         if(!['GET','HEAD'].includes(req.method)&&((req.headers.origin&&req.headers.origin!=='http://'+host)||req.headers['x-endstep-request']!=='1'))return apiError(res,403,'请求来源无效。');
+        if(req.method==='GET'&&url.pathname==='/api/forge/version')return json(res,await checkForgeRelease(forge));
         if(req.method==='GET'&&url.pathname==='/api/health'){try{return json(res,{...(await codex.status()),forge:await forge.status(),version,mode:'forge-search'});}catch(e){return json(res,{connected:false,loggedIn:false,error:e.message,mode:'connected'});}}
         if(req.method==='GET'&&url.pathname==='/api/current'){const r=replays.get(currentId);return json(res,r?{id:r.id,filename:r.filename,jsonl:r.model.sourceText,review:r.review,evidence:r.searchEvidence||[],deckProfiles:publicDeckProfile(r.matchDecks),jobs:[...jobs.values()].filter(j=>j.replayId===r.id).map(snapshot)}:null);}
         if(req.method==='POST'&&url.pathname==='/api/replays'){const b=await body(req);if(typeof b.jsonl!=='string'||typeof b.filename!=='string')throw Error('回放输入格式无效。');const r=await register(b.jsonl,b.filename);return json(res,{id:r.id,review:r.review,evidence:r.searchEvidence||[],deckProfiles:publicDeckProfile(r.matchDecks)});}

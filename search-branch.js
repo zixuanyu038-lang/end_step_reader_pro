@@ -111,6 +111,7 @@ async function runForgeBranch({job,replay,ask,progress,forge,deckService,profile
 async function runBranchQuality({job,parent,replay,ask,progress,forge}){
   const saved=JSON.parse(await fs.readFile(path.join(parent.dir,'search-candidates.json'),'utf8'));
   if(saved.sourceLine!==parent.sourceLine||!saved.plan||!saved.intent||!saved.result?.winningCandidates?.length)throw Error('这次搜索没有可供二筛的胜局。');
+  if((saved.result.engineCacheKey||null)!==(forge.cacheKey||null))throw Error('这次搜索使用了不同的 Forge 版本，请用当前引擎重新搜索。');
   const source=Source.sourceAt(replay.model.sourceText,parent.sourceLine);
   job.result={plan:saved.plan,searchSummary:parent.result.searchSummary,review:replay.review};
   const outcome=await screenAndExport({job,replay,source,ask,progress,forge,...saved});

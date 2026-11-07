@@ -271,7 +271,7 @@
   async function boot(){
     if(!['http:','https:'].includes(location.protocol)){el('codex-connection').textContent='需启动本地后端';el('manual-workflow').hidden=false;el('studio-review').disabled=true;el('studio-job').hidden=false;el('studio-job-message').textContent='请运行 start.ps1 启动应用；双击 HTML 不能调用 Codex。';el('studio-cancel').hidden=true;return;}
     try{
-      const health=await api('/api/health');state.ready=health.connected;state.loggedIn=health.loggedIn;state.forgeInstalled=!!health.forge?.installed;el('codex-connection').textContent=health.connected?(health.loggedIn?'Codex 已连接':'Codex 尚未登录'):'Codex 连接失败';el('codex-connection').classList.toggle('connected',state.ready&&state.loggedIn);el('studio-model').textContent=health.model?'模型：'+health.model+' · 推理：'+(health.reasoningEffort||'默认'):'模型：沿用本机 Codex 配置';el('studio-model').textContent+=' · '+(state.forgeInstalled?'Forge 2.0.15':'Forge 未安装，请运行安装Forge.cmd');controls();
+      const health=await api('/api/health');state.ready=health.connected;state.loggedIn=health.loggedIn;state.forgeInstalled=!!health.forge?.installed;el('codex-connection').textContent=health.connected?(health.loggedIn?'Codex 已连接':'Codex 尚未登录'):'Codex 连接失败';el('codex-connection').classList.toggle('connected',state.ready&&state.loggedIn);el('studio-model').textContent=health.model?'模型：'+health.model+' · 推理：'+(health.reasoningEffort||'默认'):'模型：沿用本机 Codex 配置';el('studio-model').textContent+=' · '+(state.forgeInstalled?(health.forge.engine||'Forge').replace(/^forge-/,'Forge '):'Forge 未安装，请运行安装Forge.cmd');controls();
       const current=await api('/api/current');
       if(!current){if(model)await onModel(model);return;}
       loadModel(Replay.parse(current.jsonl,current.filename));

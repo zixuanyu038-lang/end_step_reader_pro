@@ -3,18 +3,22 @@ const fs=require('node:fs/promises'),path=require('node:path'),crypto=require('n
 const {spawn,execFile}=require('node:child_process');
 const {promisify}=require('node:util');
 const {createInterface}=require('node:readline');
+const {baseEngine,readForgeSelection}=require('./forge-runtime');
 const execute=promisify(execFile);
 class ForgeClient {
-  constructor({runtimeDir=process.env.ENDSTEP_FORGE_RUNTIME||path.join(process.env.LOCALAPPDATA||process.env.HOME||'.','EndstepForgeProbe'),dataDir=path.join(__dirname,'.endstep-data'),timeoutMs=180000}={}){
+  constructor({runtimeDir=process.env.ENDSTEP_FORGE_RUNTIME||path.join(process.env.LOCALAPPDATA||process.env.HOME||'.','EndstepForgeProbe'),dataDir=path.join(__dirname,'.endstep-data'),timeoutMs=180000,release=readForgeSelection(dataDir)}={}){
     this.runtimeDir=runtimeDir;this.dataDir=dataDir;this.timeoutMs=timeoutMs;this.sequence=0;this.pending=new Map();this.queue=Promise.resolve();this.closed=false;
     this.java=path.join(runtimeDir,'jdk','jdk-17.0.20.1+1','bin','java.exe');
     this.javac=path.join(runtimeDir,'jdk','jdk-17.0.20.1+1','bin','javac.exe');
-    this.forgeDir=path.join(runtimeDir,'forge');this.jar=path.join(this.forgeDir,'forge-gui-desktop-2.0.15-jar-with-dependencies.jar');
-    this.classes=path.join(dataDir,'forge-classes');
+    this.engine=release?.engine||baseEngine;
+    this.cacheKey=release?this.engine+'-'+release.sha256:null;
+    this.forgeDir=release?.forgeDir||path.join(runtimeDir,'forge');
+    this.jar=path.join(this.forgeDir,'forge-gui-desktop-'+this.engine.slice(6)+'-jar-with-dependencies.jar');
+    this.classes=path.join(dataDir,'forge-classes',...(this.cacheKey?[this.cacheKey]:[]));
   }
   async status(){
     const exists=async file=>{try{await fs.access(file);return true;}catch{return false;}};
-    return{engine:'forge-2.0.15',installed:(await exists(this.java))&&(await exists(this.jar)),connected:!!this.process&&!this.process.killed,mode:'root-path-replay',error:this.lastError||null};
+    return{engine:this.engine,installed:(await exists(this.java))&&(await exists(this.jar)),connected:!!this.process&&!this.process.killed,mode:'root-path-replay',error:this.lastError||null};
   }
   async connect(){
     if(this.connection)return this.connection;
@@ -34,7 +38,7 @@ class ForgeClient {
     }
     const profile=path.join(this.forgeDir,'forge.profile.properties');
     try{await fs.writeFile(profile,'userDir=./probe-user\ncacheDir=./probe-cache\n',{flag:'wx'});}catch(e){if(e.code!=='EEXIST')throw e;}
-    const child=spawn(this.java,['-Xmx3g','-Djava.awt.headless=true','-Dfile.encoding=UTF-8','-cp',this.classes+path.delimiter+this.jar,'EngineWorker'],{cwd:this.forgeDir,windowsHide:true,stdio:['pipe','pipe','pipe']});this.process=child;
+    const child=spawn(this.java,['-Xmx3g','-Djava.awt.headless=true','-Dfile.encoding=UTF-8','-cp',this.classes+path.delimiter+this.jar,'EngineWorker',this.engine],{cwd:this.forgeDir,windowsHide:true,stdio:['pipe','pipe','pipe']});this.process=child;
     const logDir=path.join(this.dataDir,'forge');await fs.mkdir(logDir,{recursive:true});
     this.logFile=path.join(logDir,'worker.log');
     child.stderr.on('data',b=>fs.appendFile(this.logFile,b).catch(()=>{}));child.stdin.on('error',()=>{});
@@ -44,7 +48,7 @@ class ForgeClient {
         let message;try{message=JSON.parse(line);}catch{return;}
         if(message.ready){clearTimeout(timer);resolve();return;}
         const p=this.pending.get(message.id);if(!p)return;this.pending.delete(message.id);clearTimeout(p.timer);
-        if(message.ok)p.resolve(message.result);
+        if(message.ok)p.resolve({...message.result,engine:this.engine});
         else{
           const error=Error('Forge：'+message.error);
           if(typeof message.error==='string'&&message.error.startsWith('InvalidAction:'))error.code='forge_root_invalid';

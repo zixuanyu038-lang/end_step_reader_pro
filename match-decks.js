@@ -174,8 +174,9 @@ async function prepareMatchDecks({model,deckService,forge,ask,signal,deckPrefere
   if(missing.length){
     const uploaded=bases.filter(d=>d.sourceKind==='uploaded').flatMap(d=>d.main.concat(d.sideboard));
     const unknownUploads=missing.filter(c=>uploaded.some(d=>d.name===c.name));
-    if(unknownUploads.length)throw new DeckLookupError('deck_upload_invalid','Forge 无法识别上传牌名 '+unknownUploads.map(c=>c.name).join('、')+'。');
-    throw Error('Forge 数据库缺少牌面：'+missing.map(c=>c.name).join('；'));
+    const hint='。请核对英文牌名，若是新牌，可在「Forge 引擎」检查正式版。';
+    if(unknownUploads.length)throw new DeckLookupError('deck_upload_invalid','Forge 无法识别上传牌名 '+unknownUploads.map(c=>c.name).join('、')+hint);
+    throw Error('Forge 数据库缺少牌面：'+missing.map(c=>c.name).join('；')+hint);
   }
   const fixedBases=bases.map((base,i)=>{
     const matchObserved=scanned.global[i].cards;

@@ -5,6 +5,7 @@ const {buildWorld}=require('./hidden-worlds'),{search,inspectSearchWorlds}=requi
 const {prepareMatchDecks}=require('./match-decks');
 const {routeFromTrace,compileReplay}=require('./forge-replay');
 const {selectWinningLines}=require('./winning-lines');
+const {baseEngine}=require('./forge-runtime');
 const digest=x=>crypto.createHash('sha256').update(x).digest('hex');
 const packProfile=profile=>({...profile,catalog:[...profile.catalog]});
 const publicDeckProfile=profile=>profile?{byGame:profile.byGame,sideboardPlans:profile.sideboardPlans,scope:profile.scope,manualSideboard:profile.manualSideboard||[]}:null;
@@ -186,7 +187,7 @@ async function runForgeReview({job,replay,ask,progress,forge,deckService,cacheDi
       const replacements=new Map(patch.replacements.map(p=>[p.originalSourceLine,p.finding]));for(const g of review.games)g.findings=g.findings.map(f=>replacements.get(f.sourceLine)||f);
     }else review=await ask(job,prompt+'\n上次结果未通过：'+error.message+'。修正结构与引用，不能虚构证据。',S.review);
   }
-  const outcome={review,evidence,unsupported,sideboardPlans:matchDecks.sideboardPlans,deckProfiles:publicDeckProfile(matchDecks),engine:'forge-2.0.15',reviewVersion:'forge-search-v2-wins',completedAt:new Date().toISOString()};
+  const outcome={review,evidence,unsupported,sideboardPlans:matchDecks.sideboardPlans,deckProfiles:publicDeckProfile(matchDecks),engine:forge.engine||baseEngine,reviewVersion:'forge-search-v2-wins',completedAt:new Date().toISOString()};
   job.abort.signal.throwIfAborted();
   await fs.mkdir(cacheDir,{recursive:true});
   const cacheFile=path.join(cacheDir,replay.id+'.json'),temporary=cacheFile+'.'+job.id+'.tmp';

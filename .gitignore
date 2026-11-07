@@ -1,0 +1,7 @@
+.endstep-data/
+dist/
+node_modules/
+*.esreplay
+*handoff*.json
+*原始.jsonl
+branch.json

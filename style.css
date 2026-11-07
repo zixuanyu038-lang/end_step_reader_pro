@@ -27,6 +27,11 @@
 @media print{.rail-branch{display:none!important}}
 /* Connected review workspace */
 .connection-status{font-size:10px;color:var(--muted);white-space:nowrap}.connection-status.connected:before{content:'';display:inline-block;width:5px;height:5px;background:var(--green);border-radius:50%;margin-right:7px}
+.forge-version{position:relative;font-size:11px;color:var(--muted)}
+.forge-version summary{cursor:pointer;white-space:nowrap}
+.forge-version-content{position:absolute;z-index:10;right:0;width:min(280px,75vw);padding:12px;background:var(--paper);border:1px solid var(--line);line-height:1.7}
+.forge-version-content p{margin:0 0 8px}
+.forge-version-content a{margin-right:12px}
 .studio-heading{display:flex;align-items:center;justify-content:space-between;gap:24px;padding:25px 0 22px}.studio-heading h2{font:27px var(--serif);font-weight:400;margin:0 0 9px}.studio-heading p{font-size:11px;color:var(--muted);margin:0}.studio-heading .primary{font-size:12px;padding:13px 21px;white-space:nowrap}
 .studio-job{display:flex;align-items:center;justify-content:space-between;gap:20px;border-left:2px solid var(--green);background:#eceee5;padding:13px 17px;margin:0 0 20px}.studio-job>div>span{font-size:10px;color:var(--muted)}.studio-job p{font-size:12px;line-height:1.9;margin:5px 0 0;white-space:pre-wrap;overflow-wrap:anywhere}.studio-job[data-status=failed]{border-color:var(--red);background:var(--red-pale)}.studio-job button{font-size:11px;white-space:nowrap}
 .studio-overview{border-top:1px solid var(--line);padding:17px 0 21px;font-size:12px;line-height:1.9}.studio-overview>p{max-width:1100px;white-space:pre-wrap}.studio-overview .review-summary{font-size:14px;color:var(--ink)}.review-game-summaries{display:grid;grid-template-columns:1fr 1fr;gap:25px;margin-top:19px}.review-game-summaries h3{font-size:12px;font-weight:500;margin:0 0 7px}.review-game-summaries p{margin:0;color:var(--muted);white-space:pre-wrap}.review-takeaways{margin-top:18px}.review-takeaways li{margin:7px 0}

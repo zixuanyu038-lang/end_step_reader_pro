@@ -3,7 +3,7 @@ const fs=require('node:fs'),path=require('node:path'),zlib=require('node:zlib');
 const R=require('./replay.js');
 let html=fs.readFileSync(path.join(__dirname,'index.html'),'utf8');
 html=html.replace('<link rel="stylesheet" href="style.css">',()=>'<style>'+fs.readFileSync(path.join(__dirname,'style.css'),'utf8')+'</style>');
-for(const file of ['replay.js','engine.js','branch.js','app.js','studio.js'])html=html.replace(`<script src="${file}"></script>`,()=>'<script>'+fs.readFileSync(path.join(__dirname,file),'utf8').replace(/<\/script/gi,'<\\/script')+'</script>');
+for(const file of ['replay.js','engine.js','branch.js','app.js','studio.js','forge-version-ui.js'])html=html.replace(`<script src="${file}"></script>`,()=>'<script>'+fs.readFileSync(path.join(__dirname,file),'utf8').replace(/<\/script/gi,'<\\/script')+'</script>');
 fs.mkdirSync(path.join(__dirname,'dist'),{recursive:true});
 fs.writeFileSync(path.join(__dirname,'dist','Endstep对局档案.html'),html);
 if(process.argv[2]){

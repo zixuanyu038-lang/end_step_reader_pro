@@ -1,6 +1,7 @@
 'use strict';
 const crypto=require('node:crypto');
 const {auditRoot}=require('./hidden-worlds');
+const {baseEngine}=require('./forge-runtime');
 const digest=x=>crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex');
 const compact=a=>({key:a.key,kind:a.kind,actorId:a.actorId,label:a.label});
 function deduplicate(actions){
@@ -142,7 +143,7 @@ async function search({client,source,worlds,signal,budget={},checkedWorlds,onPro
   }
   const representative=await client.request({command:'simulate',root:representativeWorld.root,path:chosenPath.map(compact),includeTrace:false,horizonTurns:2,maxChoices:settings.maxChoices,maxSteps:settings.maxSteps},{signal});
   const comparison=original?{matched:true,meanDifference:best.mean-original.mean,perWorldDifferences:best.worlds.map(w=>({worldIndex:w.worldIndex,difference:w.mean-original.worlds.find(o=>o.worldIndex===w.worldIndex).mean}))}:{matched:false,reason:runs[0]?.original?.reason||'原操作没有完成同预算比较。'};
-  return{format:'forge-search-evidence',version:1,engine:'forge-2.0.15',algorithm:'bounded adversarial UCT over replayed engine paths; independent fixed hidden worlds',elapsedMs:Date.now()-startedAt,settings,simulated,expanded,rootAudits,alternatives,best,original,comparison,runs,
+  return{format:'forge-search-evidence',version:1,engine:client.engine||baseEngine,engineCacheKey:client.cacheKey||null,algorithm:'bounded adversarial UCT over replayed engine paths; independent fixed hidden worlds',elapsedMs:Date.now()-startedAt,settings,simulated,expanded,rootAudits,alternatives,best,original,comparison,runs,
     winningCandidates,representative:{worldId:representativeWorld.id,scenario:representativeWorld.scenario,path:chosenPath.map(compact),...representative},
     limitations:['启发式材料评分不是胜率','情景集可能包含明确构造的交互压力测试，均值不代表真实概率','有限候选、深度、世界及预算，不能证明最优','法术力支付、战斗与部分选择由 Forge 内置策略决定','各隐藏世界分别搜索，尚未实现完整信息集搜索；深层策略可能存在 determinization bias','代表轨迹只是一个已固定假设世界中的真实引擎后续']};
 }

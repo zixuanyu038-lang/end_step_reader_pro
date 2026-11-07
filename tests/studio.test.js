@@ -92,7 +92,7 @@ test('deck source failures distinguish a miss, missing search capability and an 
  }};
  const forge={close(){},async request(){assert.fail('Deck failures must stop before invoking Forge.');}};
  const studio=createStudio({port:0,dataDir:dir,client,forgeClient:forge}),base=await studio.start();
- t.after(async()=>{await studio.close();assert.equal(path.dirname(dir),temp);assert.ok(path.basename(dir).startsWith('endstep-deck-source-'));await fs.rm(dir,{recursive:true,force:true});});
+ t.after(async()=>{await studio.close();assert.equal(path.dirname(dir),temp);assert.ok(path.basename(dir).startsWith('endstep-deck-source-'));await fs.rm(dir,{recursive:true,force:true,maxRetries:5,retryDelay:30});});
  const home=await fetch(base),headers={Cookie:home.headers.get('set-cookie').split(';')[0],'Content-Type':'application/json','X-Endstep-Request':'1'};
  const post=(url,data)=>fetch(base+url,{method:'POST',headers,body:JSON.stringify(data)}).then(res=>res.json());
  const replay=await post('/api/replays',{filename:'test.esreplay',jsonl:text});
