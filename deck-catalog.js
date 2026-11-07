@@ -41,7 +41,11 @@ class DeckCatalog{
     }catch{}
     return[...unique.values()];
   }
-  async find(facts,options){return rankCandidates(await this.load(),facts,options);}
+  async find(facts,options){
+    const decks=await this.load();
+    if(options?.requireCatalog&&!decks.length)throw Error('本地牌表库无法读取或没有有效数据。');
+    return rankCandidates(decks,facts,options);
+  }
 }
 async function syncCatalog({output=path.join(__dirname,'.endstep-data','deck-catalog.json'),format='Legacy',maxFiles=20,months=2,now=new Date(),fetchImpl=fetch,signal,onProgress=()=>{}}={}){
   maxFiles=Math.max(1,Math.min(40,maxFiles));months=Math.max(1,Math.min(6,months));

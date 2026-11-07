@@ -30,6 +30,23 @@
     <section id="codex-view" class="codex-view" hidden>
       <section id="studio-panel" class="studio-panel">
         <header class="studio-heading"><div><h2>整盘复盘</h2><p>先看整盘决策，再选择一个节点重演。</p><span id="studio-model" class="studio-model">模型：读取配置中…</span></div><button id="studio-review" class="primary">生成整盘复盘 ↗</button></header>
+        <fieldset id="studio-deck-sources" class="studio-deck-sources" hidden>
+          <legend>牌表来源</legend>
+          <div class="deck-source-grid">
+            <div>
+              <label for="studio-deck-mode-own">己方</label>
+              <select id="studio-deck-mode-own" aria-describedby="studio-deck-hint"><option value="local">本地检索</option><option value="web">AI 联网查找</option><option value="upload">上传牌表</option></select>
+              <input type="file" id="studio-deck-file-own" accept=".txt,.dec,text/plain" aria-label="上传己方牌表" aria-describedby="studio-deck-format" hidden>
+            </div>
+            <div>
+              <label for="studio-deck-mode-opponent">对手</label>
+              <select id="studio-deck-mode-opponent" aria-describedby="studio-deck-hint"><option value="local">本地检索</option><option value="web">AI 联网查找</option><option value="upload">上传牌表</option></select>
+              <input type="file" id="studio-deck-file-opponent" accept=".txt,.dec,text/plain" aria-label="上传对手牌表" aria-describedby="studio-deck-format" hidden>
+            </div>
+          </div>
+          <p id="studio-deck-hint">有完整回放牌表时优先使用记录。选择上传可指定对应一方的起始牌表。</p>
+          <p id="studio-deck-format" hidden>请选择英文纯文本牌表，每行如 <code>4 Brainstorm</code>。备牌写在 <code>Sideboard</code> 下，或逐行用 <code>SB:</code> 标记。</p>
+        </fieldset>
         <div id="studio-job" class="studio-job" hidden><div><span id="studio-job-label"></span><p id="studio-job-message" role="status"></p></div><button id="studio-cancel" class="text-button">停止</button></div>
         <div id="studio-game-stages" class="studio-game-stages"></div>
         <section id="studio-overview" class="studio-overview" hidden></section>

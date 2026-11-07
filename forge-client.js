@@ -44,7 +44,12 @@ class ForgeClient {
         let message;try{message=JSON.parse(line);}catch{return;}
         if(message.ready){clearTimeout(timer);resolve();return;}
         const p=this.pending.get(message.id);if(!p)return;this.pending.delete(message.id);clearTimeout(p.timer);
-        message.ok?p.resolve(message.result):p.reject(Error('Forge：'+message.error));
+        if(message.ok)p.resolve(message.result);
+        else{
+          const error=Error('Forge：'+message.error);
+          if(typeof message.error==='string'&&message.error.startsWith('InvalidAction:'))error.code='forge_root_invalid';
+          p.reject(error);
+        }
       });
       child.once('error',e=>{clearTimeout(timer);reject(e);if(this.process===child)this.fail(e);});
       child.once('exit',()=>{clearTimeout(timer);const error=Error('Forge 工作进程已结束。');reject(error);if(this.process===child)this.fail(error);});

@@ -26,7 +26,7 @@ function switchView(next){
   view=next;const raw=next==='jsonl',codex=next==='codex';
   $('report-view').hidden=next!=='report';$('report-toolbar').hidden=next!=='report';$('jsonl-view').hidden=!raw;$('codex-view').hidden=!codex;
   for(const [id,active] of [['view-report',next==='report'],['view-jsonl',raw],['view-codex',codex]]){$(id).classList.toggle('active',active);$(id).setAttribute('aria-pressed',String(active));}
-  if(raw)renderRaw();if(codex)prepareBranch();
+  if(raw)renderRaw();if(codex)prepareBranch();if(next==='report'&&model)renderReading();
 }
 function prepareBranch(){
   $('handoff-prompt').value=Branch.prompt();
@@ -148,7 +148,9 @@ function renderReading(){
     if(e.phase!==last){last=e.phase;html+=`<div class="phase-label">${esc(last)}</div>`;}
     const parts=e.text.split('\n记录原文：');
     const branchable=e.sourceLine&&['SPELL_CAST','ABILITY_ACTIVATED','LAND_PLAYED','MODE_CHOSEN','ATTACKERS_DECLARED','BLOCKERS_DECLARED','TRIGGER_FIRED'].includes(e.type);
-    html+=`<div class="event-row"><button class="event ${i===focused?'selected':''}" data-entry="${i}" data-type="${esc(e.type)}" aria-label="${esc(parts[0])}，查看此前快照"><time>${Replay.clock(e.t)}</time><div><span class="event-kind">${esc(e.kind)}</span><div class="event-text">${esc(parts[0])}</div>${parts[1]?`<div class="event-raw-text">${esc(parts[1])}</div>`:''}</div></button>${branchable?`<button class="event-branch-button" data-ai-branch="${e.sourceLine}" aria-label="从${esc(parts[0])}之前开分支">从这里开分支 ↗</button>`:''}</div>`;
+    const branchState=branchable?globalThis.Studio?.branchStatus(e.sourceLine):null;
+    const branchLabel=branchState==='ready'?'可恢复 · 查看分支':branchState==='unsupported'?'不可直接恢复 · 查看原因':'检查分支起点';
+    html+=`<div class="event-row"><button class="event ${i===focused?'selected':''}" data-entry="${i}" data-type="${esc(e.type)}" aria-label="${esc(parts[0])}，查看此前快照"><time>${Replay.clock(e.t)}</time><div><span class="event-kind">${esc(e.kind)}</span><div class="event-text">${esc(parts[0])}</div>${parts[1]?`<div class="event-raw-text">${esc(parts[1])}</div>`:''}</div></button>${branchable?`<button class="event-branch-button" data-ai-branch="${e.sourceLine}" aria-label="${branchLabel}：${esc(parts[0])}">${branchLabel} ↗</button>`:''}</div>`;
     if(i===focused)html+=`<details class="raw-inspector"><summary>查看这条事件的原始记录</summary><pre>${esc(e.rawRecord||JSON.stringify(e.raw,null,2))}</pre></details>`;
   });
   if(!count)html=`<p class="empty">${query?'本回合没有匹配记录。可选择左侧标点的回合，或清空搜索。':'本回合没有精简事件。切换「完整记录」可查看阶段与底层日志。'}</p>`;

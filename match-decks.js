@@ -1,7 +1,7 @@
 'use strict';
 const crypto=require('node:crypto');
 const R=require('./replay');
-const {canonicalName}=require('./deck-service');
+const {canonicalName,DeckLookupError}=require('./deck-service');
 const Schema=require('./search-schema'),{validate}=require('./studio-schema');
 const hash=x=>crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex');
 const counts=names=>{const result=new Map();for(const name of names)result.set(name,(result.get(name)||0)+1);return[...result].map(([name,count])=>({name,count}));};
@@ -108,19 +108,51 @@ function coverGlobalFacts(base,observed,catalog,size=base.main.reduce((n,c)=>n+c
   }
   const list=m=>[...m].filter(([,n])=>n>0).map(([name,count])=>({name,count}));return{...base,main:list(main),sideboard:list(side),adjustments};
 }
-async function prepareMatchDecks({model,deckService,forge,ask,signal,onProgress=()=>{}}){
+function validateUpload(deck,player,first,recorded){
+  const main=mapCounts(deck.main),all=new Map(main),id=player.playerId;
+  const expected=first.initialDeckSizes[id];
+  if(expected&&total(main)!==expected)throw Error('上传的主牌有 '+total(main)+' 张，回放起始主牌有 '+expected+' 张。');
+  for(const [name,count] of mapCounts(deck.sideboard))all.set(name,(all.get(name)||0)+count);
+  const firstCards=counts([...(first.players.get(id)?.values()||[])].map(c=>c.name));
+  for(const [cards,available,label] of [[firstCards,main,'第一局主牌'],[player.cards,all,'整盘主备牌']]){
+    const missing=cards.filter(c=>(available.get(c.name)||0)<c.count);
+    if(missing.length)throw Error(label+'缺少回放已出现的 '+missing.map(c=>c.count+' × '+c.name).join('、')+'。');
+  }
+  for(const [key,knownDeck] of recorded)if(key.endsWith(':'+id)){
+    const known=counts(knownDeck.main.concat(knownDeck.sideboard).flatMap(c=>Array(c.count).fill(c.name.split(' // ')[0])));
+    if(total(all)!==known.reduce((n,c)=>n+c.count,0)||known.some(c=>all.get(c.name)!==c.count))throw Error('上传的主备牌组成与回放中完整记录的牌池不一致。');
+  }
+}
+async function prepareMatchDecks({model,deckService,forge,ask,signal,deckPreferences=null,onProgress=()=>{}}){
   const scanned=scanMatch(model.sourceText),bases=[];
+  const first=[...scanned.games.values()][0];
+  if(!first)throw Error('回放没有可用于核对起始牌表的对局。');
+  const allowWeb=!deckPreferences||Object.values(deckPreferences).some(p=>p.mode==='web');
+  const label=id=>String(id)===String(scanned.header.seat)?'己方':'对手';
   for(const player of scanned.global){
+    const uploaded=deckPreferences?.[player.playerId]?.deck;
+    if(uploaded)try{validateUpload(uploaded,player,first,scanned.recorded);}
+    catch(error){throw new DeckLookupError('deck_upload_invalid',label(player.playerId)+' · '+error.message);}
+  }
+  for(const player of scanned.global){
+    const preference=deckPreferences?.[player.playerId];
+    if(preference?.mode==='upload'){bases.push(preference.deck);continue;}
     const recorded=scanned.recorded.get('1:'+player.playerId);
     if(recorded){bases.push(recorded);continue;}
     const known=player.cards.flatMap(c=>Array.from({length:c.count},(_,i)=>({id:c.name+':'+i,name:c.name,ownerId:player.playerId})));
-    const initial=Object.fromEntries([...scanned.games.values()][0]?.initialDeckSizes?Object.entries([...scanned.games.values()][0].initialDeckSizes):[]);
-    bases.push(await deckService.resolve({source:{known,initialDeckSizes:initial,game:1,global:true,format:scanned.header.formatId||'Legacy',recordedAt:scanned.header.recordedAt,deckFacts:player.cards},playerId:player.playerId,ask,signal,onProgress}));
+    try{
+      bases.push(await deckService.resolve({source:{known,initialDeckSizes:first.initialDeckSizes,game:1,global:true,format:scanned.header.formatId||'Legacy',recordedAt:scanned.header.recordedAt},playerId:player.playerId,mode:preference?.mode||(deckPreferences?'local':'auto'),ask,signal,onProgress:message=>onProgress(label(player.playerId)+' · '+message)}));
+    }catch(error){if(signal?.aborted)throw error;throw new DeckLookupError(error instanceof DeckLookupError?error.code:'deck_lookup_failed',label(player.playerId)+' · '+error.message);}
   }
   const names=[...new Set(bases.concat([...scanned.recorded.values()]).flatMap(d=>d.main.concat(d.sideboard)).map(c=>c.name.split(' // ')[0]).concat(scanned.global.flatMap(p=>p.cards.map(c=>c.name))))];
   const meta=await forge.request({command:'catalog',names},{signal}),catalog=new Map(meta.cards.map(c=>[c.name,c]));
-  const missing=meta.cards.filter(c=>!c.found);if(missing.length)throw Error('Forge 数据库缺少牌面：'+missing.map(c=>c.name).join('；'));
-  const first=[...scanned.games.values()][0];
+  const missing=meta.cards.filter(c=>!c.found);
+  if(missing.length){
+    const uploaded=bases.filter(d=>d.sourceKind==='uploaded').flatMap(d=>d.main.concat(d.sideboard));
+    const unknownUploads=missing.filter(c=>uploaded.some(d=>d.name===c.name));
+    if(unknownUploads.length)throw new DeckLookupError('deck_upload_invalid','Forge 无法识别上传牌名 '+unknownUploads.map(c=>c.name).join('、')+'。');
+    throw Error('Forge 数据库缺少牌面：'+missing.map(c=>c.name).join('；'));
+  }
   const fixedBases=bases.map((base,i)=>{
     const matchObserved=scanned.global[i].cards;
     const firstObserved=counts([...(first.players.get(String(i))?.values()||[])].map(c=>c.name));
@@ -144,7 +176,8 @@ async function prepareMatchDecks({model,deckService,forge,ask,signal,onProgress=
     let repair='';
     for(let attempt=0;attempt<2;attempt++){
       onProgress('正在结合双方完整牌表推理换备方案…');
-      const response=await ask(`你是万智牌比赛换备教练。根据双方固定的完整主牌和备牌，推理后续各局的换备。可使用联网搜索查找该对局的公开换备指南；若实际使用网页，在reason中列出支持结论的原始链接，并区分资料建议与自己的推理。没有找到资料也可自行推理，不得编造引用。所有换入/换出均相对于提供的基准主备牌，保留主牌张数，不能创造牌或超出实体数量。结合对局类型、先后手、每局已公开牌的最低数量，给每个后续game的每个playerId一份方案。swaps每项为同数量的成对替换：inName从原备牌进入、outName从原主牌离开、count为两者相同数量；可拆成多项，允许不换牌的空数组。这样接口保证总数相等。不能换入不在原备牌中的牌，不能把本次刚换出的牌算成可换入来源。对手方案必须容纳该局公开牌。录制侧实际换备另有精确记录时，你仍给建议对照，程序会保留实际牌表作事实。两份完整牌表允许用于匹配分析，不能声称对手知道我们的实际换备或手牌。未知灵活位明确是不确定假设。\n`+JSON.stringify({players:scanned.header.players,baseDecks:fixedBases.map((d,i)=>({playerId:String(i),main:d.main,sideboard:d.sideboard,source:d.basis})),games:later.map(g=>({game:g.game,startingPlayerId:g.startingPlayerId,publicMinimums:['0','1'].map(id=>({playerId:id,cards:counts([...(g.players.get(id)?.values()||[])].map(c=>c.name))})),recordedViewerDeck:scanned.recorded.get(g.game+':'+String(scanned.header.seat))||null}))})+repair,Schema.sideboarding,{webSearch:true});
+      const sources=allowWeb?'可使用联网搜索查找公开换备指南。使用网页时在 reason 中列出原始链接，区分资料与推理。':'根据给出的牌表与已公开牌自行推理。';
+      const response=await ask(`你是万智牌比赛换备教练。根据双方固定的完整主牌和备牌，推理后续各局的换备。${sources}不得编造引用。所有换入/换出均相对于提供的基准主备牌，保留主牌张数，不能创造牌或超出实体数量。结合对局类型、先后手、每局已公开牌的最低数量，给每个后续game的每个playerId一份方案。swaps每项为同数量的成对替换：inName从原备牌进入、outName从原主牌离开、count为两者相同数量；可拆成多项，允许不换牌的空数组。这样接口保证总数相等。不能换入不在原备牌中的牌，不能把本次刚换出的牌算成可换入来源。对手方案必须容纳该局公开牌。录制侧实际换备另有精确记录时，你仍给建议对照，程序会保留实际牌表作事实。两份完整牌表允许用于匹配分析，不能声称对手知道我们的实际换备或手牌。未知灵活位明确是不确定假设。\n`+JSON.stringify({players:scanned.header.players,baseDecks:fixedBases.map((d,i)=>({playerId:String(i),main:d.main,sideboard:d.sideboard,source:d.basis})),games:later.map(g=>({game:g.game,startingPlayerId:g.startingPlayerId,publicMinimums:['0','1'].map(id=>({playerId:id,cards:counts([...(g.players.get(id)?.values()||[])].map(c=>c.name))})),recordedViewerDeck:scanned.recorded.get(g.game+':'+String(scanned.header.seat))||null}))})+repair,Schema.sideboarding,{webSearch:allowWeb});
       validate(response,Schema.sideboarding);
       response.plans=response.plans.map(plan=>({...plan,ins:counts(plan.swaps.flatMap(s=>Array(s.count).fill(s.inName))),outs:counts(plan.swaps.flatMap(s=>Array(s.count).fill(s.outName)))}));
       try{

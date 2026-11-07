@@ -82,3 +82,37 @@ test('HTTP workflow dispatches Forge runners, persists results and rejects cross
  await studio.close();const restored=createStudio({port:0,dataDir:dir,client:fake,forgeClient:forge,runners}),restoredBase=await restored.start();t.after(()=>restored.close());
  const restoredRoot=await fetch(restoredBase),restoredHeaders={Cookie:restoredRoot.headers.get('set-cookie').split(';')[0]};const current=await fetch(restoredBase+'/api/current',{headers:restoredHeaders}).then(r=>r.json());assert.equal(current.id,r.id);assert.ok(current.review);assert.ok(current.jobs.some(j=>j.id===branch.id&&j.status==='complete'));assert.equal((await fetch(restoredBase+branch.result.downloadUrl,{headers:restoredHeaders})).status,200);
 });
+test('deck source failures distinguish a miss, missing search capability and an invalid upload',async t=>{
+ const temp=path.resolve(os.tmpdir()),dir=await fs.mkdtemp(path.join(temp,'endstep-deck-source-'));
+ let modelCalls=0,webRan=false;
+ const client={close(){},async generate({webSearch,onDiagnostic}){
+   assert.equal(webSearch,true);modelCalls++;
+   if(webRan)onDiagnostic({event:'web_search_completed'});
+   return{found:false,archetype:'',url:'',date:'',basis:'No matching reference.',main:[],sideboard:[]};
+ }};
+ const forge={close(){},async request(){assert.fail('Deck failures must stop before invoking Forge.');}};
+ const studio=createStudio({port:0,dataDir:dir,client,forgeClient:forge}),base=await studio.start();
+ t.after(async()=>{await studio.close();assert.equal(path.dirname(dir),temp);assert.ok(path.basename(dir).startsWith('endstep-deck-source-'));await fs.rm(dir,{recursive:true,force:true});});
+ const home=await fetch(base),headers={Cookie:home.headers.get('set-cookie').split(';')[0],'Content-Type':'application/json','X-Endstep-Request':'1'};
+ const post=(url,data)=>fetch(base+url,{method:'POST',headers,body:JSON.stringify(data)}).then(res=>res.json());
+ const replay=await post('/api/replays',{filename:'test.esreplay',jsonl:text});
+ async function job(deckPreferences){
+   const submitted=await post('/api/jobs',{type:'review',replayId:replay.id,deckPreferences});
+   assert.ok(submitted.id,submitted.error);
+   for(let i=0;i<100;i++){
+     const current=await fetch(base+'/api/jobs/'+submitted.id,{headers}).then(res=>res.json());
+     if(current.status==='failed')return current;
+     await new Promise(resolve=>setTimeout(resolve,10));
+   }
+   assert.fail('Deck lookup did not finish.');
+ }
+ const local=await job({0:{mode:'local'}});
+ assert.equal(local.errorCode,'deck_not_found');assert.match(local.message,/未查询到牌表/);assert.equal(modelCalls,0);
+ const webUnavailable=await job({0:{mode:'web'}});
+ assert.equal(webUnavailable.errorCode,'deck_lookup_failed');assert.match(webUnavailable.error,/未执行联网搜索/);
+ webRan=true;
+ const webMiss=await job({0:{mode:'web'}});
+ assert.equal(webMiss.errorCode,'deck_not_found');assert.match(webMiss.error,/对手/);
+ const upload=await job({0:{mode:'web'},1:{mode:'upload',text:'Deck\n60 Mountain'}});
+ assert.equal(upload.errorCode,'deck_upload_invalid');assert.match(upload.error,/己方.*60 张.*4 张/);assert.equal(modelCalls,2);
+});

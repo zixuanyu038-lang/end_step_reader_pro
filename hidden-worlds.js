@@ -10,6 +10,10 @@ const counts=m=>[...m].filter(([,n])=>n>0).map(([name,count])=>({name,count}));
 function random(seed){let n=seed>>>0;return()=>{n+=0x6D2B79F5;let t=n;t=Math.imul(t^t>>>15,t|1);t^=t+Math.imul(t^t>>>7,t|61);return((t^t>>>14)>>>0)/4294967296;};}
 function shuffle(list,rng){for(let i=list.length-1;i>0;i--){const j=Math.floor(rng()*(i+1));[list[i],list[j]]=[list[j],list[i]];}return list;}
 function reject(message){throw Object.assign(Error(message),{code:'unsupported_root'});}
+function supportedStackTrigger(entry){
+  return entry.isTrigger===true&&entry.sourceCard?.name==='Acererak the Archlich'&&entry.sourceCardZone==='Battlefield'
+    &&entry.abilityDescription?.startsWith('When Acererak the Archlich enters,')&&!entry.optionalTrigger&&!entry.targets?.length;
+}
 function cardText(source,c){
   if(c.faceDown||c.isCopyOfRealCard&&!c.isToken||c.isPhasedOut||c.isAttacking||c.isBlocking||c.attachedCards?.length)reject('当前节点包含尚未恢复的牌面状态：'+c.name+'。');
   const name=nameOf(source,c);if(/[;|\r\n]/.test(name))reject('牌名包含不支持的局面分隔符。');
@@ -38,8 +42,13 @@ function cardText(source,c){
 function buildWorld(source,decks,catalog,seed,{stressCard=null}={}){
   const state=source.baseline;
   if(state.players.length!==2)reject('目前只支持双人对局。');
-  if(/COMBAT|ATTACK|BLOCK|CLEANUP/.test(state.phase))reject('当前节点处于战斗或清除步骤，尚未恢复战斗声明。请选择相邻的施法节点。');
-  if(state.stack?.some(s=>s.isAbility||s.isTrigger))reject('该节点包含需要单独恢复的堆叠异能，请选择相邻的施法节点。');
+  if(/COMBAT|ATTACK|BLOCK|CLEANUP/.test(state.phase))reject('当前节点处于战斗或清除步骤，工作台尚未支持恢复这一状态。');
+  if(state.stack?.some(s=>(s.isAbility||s.isTrigger)&&!supportedStackTrigger(s)))reject('该节点包含尚未支持恢复的堆叠异能。');
+  if(state.stack?.some(supportedStackTrigger)){
+    const start=source.rows?.findLast(r=>r.line<source.anchor.line&&r.row.k==='chapter'&&r.row.edge==='start')?.line||0;
+    const ventured=source.rows?.some(r=>r.line>=start&&r.line<source.anchor.line&&r.row.k==='event'&&(/DUNGEON|VENTURE/.test(r.row.event.type)||/\b(?:ventures into|ventured into|completes? (?:the )?dungeon)\b/i.test(r.row.event.message||'')));
+    if(ventured||state.players.some(p=>p.commandZone?.some(c=>c.types?.includes('Dungeon'))))reject('这个起点已有地下城进度，尚无法核对恢复。');
+  }
   if(state.players.some(p=>p.hasInitiative))reject('起点已有主动权，但尚未恢复完整地下城进度。');
   if(state.isDay||state.isNight)reject('这个起点包含尚未核对恢复的昼夜状态。');
   if(source.activeUnrestoredEffects?.length)reject('该节点仍有需要恢复的持续效果：'+source.activeUnrestoredEffects.map(e=>e.cardName).join('；'));
@@ -54,7 +63,7 @@ function buildWorld(source,decks,catalog,seed,{stressCard=null}={}){
     const supplied=decks[index];if(!supplied?.verified)reject('隐藏世界必须使用核对过来源的牌表。');
     const pool=countCards(supplied.main.map(c=>({...c,name:canonicalName(c.name.split(' // ')[0])}))),side=countCards(supplied.sideboard.map(c=>({...c,name:canonicalName(c.name.split(' // ')[0])})));
     const physical=c=>c.name!=='Hidden card'&&!c.faceDown&&!c.isToken&&!(c.zone==='Command'&&!c.isCommander&&!c.isCompanion);
-    const known=ZONES.flatMap(z=>(player[z]||[]).filter(physical)).concat((state.stack||[]).filter(s=>String(s.sourceCard.ownerId)===String(player.id)).map(s=>s.sourceCard));
+    const known=ZONES.flatMap(z=>(player[z]||[]).filter(physical)).concat((state.stack||[]).filter(s=>!s.isAbility&&!s.isTrigger&&String(s.sourceCard.ownerId)===String(player.id)).map(s=>s.sourceCard));
     const libraryKnown=String(player.id)===String(source.header.seat)?source.known.filter(c=>String(c.ownerId)===String(player.id)&&!allCurrent.has(String(c.id))&&!c.isToken&&c.name!=='Hidden card'):[];
     const required=new Map();for(const c of known.concat(libraryKnown)){const name=nameOf(source,c);required.set(name,(required.get(name)||0)+1);}
     const replacements=[];
@@ -118,7 +127,8 @@ function auditRoot(source,actual){
   same(Number(actual.turnNumber),Number(source.baseline.turnNumber),'回合数');same(String(actual.activePlayerId),String(source.baseline.activePlayerId),'主动玩家');same(String(actual.priorityPlayerId),String(source.baseline.priorityPlayerId),'优先权');
   const phase=x=>({END_STEP:'END_OF_TURN',BEGIN_COMBAT:'COMBAT_BEGIN',DECLARE_ATTACKERS:'COMBAT_DECLARE_ATTACKERS',DECLARE_BLOCKERS:'COMBAT_DECLARE_BLOCKERS',END_COMBAT:'COMBAT_END'})[x]||x;
   same(phase(actual.phase),phase(source.baseline.phase),'阶段');
-  same(actual.stack.map(s=>s.sourceCard.name),source.baseline.stack.map(s=>s.sourceCard.name),'堆叠顺序与牌面');
+  const stackIdentity=s=>[s.sourceCard.name,String(s.sourceCard.id),!!s.isAbility,!!s.isTrigger,String(s.controllerId??s.sourceCard.controllerId)];
+  same(actual.stack.map(stackIdentity),source.baseline.stack.map(stackIdentity),'堆叠顺序、来源牌与控制者');
   for(const [i,p] of source.baseline.players.entries()){
     const q=actual.players[i];if(!q)continue;same(q.life,p.life,'生命 '+p.id);same(q.librarySize,p.librarySize,'牌库张数 '+p.id);same(q.handSize,p.handSize,'手牌张数 '+p.id);
     const normPool=x=>Object.fromEntries(Object.entries(x||{}).filter(([,n])=>n>0).sort(([a],[b])=>a.localeCompare(b)));same(normPool(q.manaPool),normPool(p.manaPool),'法术力池 '+p.id);

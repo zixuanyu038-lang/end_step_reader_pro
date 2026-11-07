@@ -8,6 +8,26 @@ const assert=require('node:assert/strict'),{ForgeClient}=require('../forge-clien
   const bolt=expanded.actions.find(a=>a.cardName==='Lightning Bolt'&&(a.targets||[]).flat().includes('p:0'));assert.ok(bolt,'Bolt must have a real legal opponent target');
   const result=await client.request({command:'simulate',root,path:[bolt],includeTrace:true,horizonTurns:2});
   assert.equal(result.stopReason,'game_over');assert.equal(result.state.winnerId,'1');assert.equal(result.state.players[0].life,0);assert.equal(result.trace.find(f=>f.action)?.action.manaPaid[0].color,'R');
+  const acerName='Acererak the Archlich';
+  const triggered={...root,stateText:root.stateText.replace('p1hand=Lightning Bolt|Id:11','p0battlefield='+acerName+'|Id:9\np1hand=Swords to Plowshares|Id:11;Consign to Memory|Id:12').replace('p1battlefield=Mountain|Id:10','p1battlefield=Tundra|Id:10;Tundra|Id:13'),stack:[{
+    sourceCard:{id:9,name:acerName,controllerId:'0'},sourceCardZone:'Battlefield',isAbility:true,isTrigger:true,abilityDescription:'When Acererak the Archlich enters, if you haven\'t completed Tomb of Annihilation, return it and venture into the dungeon.',targets:[]
+  }]};
+  const triggerRoot=await client.request({command:'expand',root:triggered});
+  assert.equal(triggerRoot.state.stack[0].isTrigger,true);
+  const swords=triggerRoot.actions.filter(a=>a.cardName==='Swords to Plowshares');
+  assert.ok(swords.every(a=>!a.targets.flat().includes('s:9')),'Swords cannot target a stack ability');
+  const exile=swords.find(a=>a.targets.flat().includes('c:9'));assert.ok(exile,'Swords can target Acererak on the battlefield');
+  assert.ok(triggerRoot.actions.some(a=>a.cardName==='Consign to Memory'&&a.targets.flat().includes('s:9')),'Consign can target the restored trigger');
+  const exileRun=await client.request({command:'simulate',root:triggered,path:[exile],includeTrace:true,horizonTurns:1});
+  const exiled=exileRun.trace.find(f=>f.state.players[0].exile.some(c=>c.id===9));
+  assert.equal(exiled?.state.stack[0]?.isTrigger,true,'Exiling Acererak leaves its enter trigger on the stack');
+  const replacement={...triggered,intent:{goals:[
+    {action:'avoid',cardName:'Consign to Memory',scope:'initial_exchange'},
+    {action:'cast',cardName:'Swords to Plowshares',targets:[{kind:'card',name:acerName,playerId:'0'}],modes:[]}
+  ]}};
+  const intentRun=await client.request({command:'simulate',root:replacement,path:[],includeTrace:true,horizonTurns:1});
+  assert.equal(intentRun.intentStatus.completed,1);
+  assert.ok(!intentRun.trace.some(f=>f.action?.cardName==='Consign to Memory'&&f.state.stack.some(item=>item.isTrigger&&item.sourceCard.id===9)),'The replaced spell stays banned during the original exchange');
   console.log('Forge 2.0.15 自检通过：优先权、合法目标、红色费用、结算、终局和抓牌历史。');
  }finally{client.close();}
 })().catch(error=>{console.error(error.message);process.exitCode=1;});

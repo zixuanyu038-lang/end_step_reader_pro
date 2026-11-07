@@ -16,6 +16,9 @@ import forge.game.mana.Mana;
 import forge.game.phase.PhaseHandler;
 import forge.game.player.*;
 import forge.game.spellability.*;
+import forge.game.trigger.Trigger;
+import forge.game.trigger.TriggerType;
+import forge.game.trigger.WrappedAbility;
 import forge.game.zone.ZoneType;
 import forge.util.MyRandom;
 import java.io.*;
@@ -57,7 +60,7 @@ public final class EngineWorker {
         JsonArray path;int pathIndex=0,choices=0,step=0,rootTurn=0,viewer=1,maxChoices=400;
         boolean rollout=false,includeTrace=false;Choice pending;int logOffset=0;
         Map<String,Object> lastAction;
-        int goalIndex=0,goalsCompleted=0,goalStartedTurn=0;final List<String> blockedGoals=new ArrayList<>();
+        int goalIndex=0,goalsCompleted=0,goalStartedTurn=0;boolean initialExchangeOpen;final List<String> blockedGoals=new ArrayList<>();
         int external(Card c){return external.getOrDefault(c.getId(),2_000_000_000+c.getId());}
         String ref(GameObject object){
             if(object instanceof Player p)return "p:"+seats.indexOf(p);
@@ -90,7 +93,7 @@ public final class EngineWorker {
             for(JsonElement e:root.getAsJsonObject("intent").getAsJsonArray("goals")){
                 JsonObject goal=e.getAsJsonObject();if(!str(goal,"action","").equals("avoid")||!str(goal,"cardName","").equals(str(action,"cardName","")))continue;
                 String scope=str(goal,"scope","this_turn");
-                if(scope.equals("entire_branch")||scope.equals("this_turn")&&game.getPhaseHandler().getTurn()==rootTurn||scope.equals("until_goals_complete")&&wanted()!=null)return true;
+                if(scope.equals("entire_branch")||scope.equals("this_turn")&&game.getPhaseHandler().getTurn()==rootTurn||scope.equals("until_goals_complete")&&wanted()!=null||scope.equals("initial_exchange")&&initialExchangeOpen)return true;
             }
             return false;
         }
@@ -138,6 +141,7 @@ public final class EngineWorker {
         Controller(Game g,Player p,LobbyPlayer lp,Context c){super(g,p,lp);actor=p;context=c;getAi().setUseSimulation(null);}
         @Override public List<SpellAbility> chooseSpellAbilityToPlay(){
             if(++context.choices>context.maxChoices)throw new Boundary();
+            if(context.game.getStack().isEmpty()||context.game.getPhaseHandler().getTurn()!=context.rootTurn)context.initialExchangeOpen=false;
             long decisionSeed=context.root.get("seed").getAsLong()+0x9e3779b97f4a7c15L*context.choices;
             MyRandom.setRandom(new Random(decisionSeed));
             if(context.pathIndex<context.path.size()){
@@ -250,7 +254,7 @@ public final class EngineWorker {
                 for(int n=0;n<num(history,"planeswalkerActivations",0);n++)card.addPlaneswalkerAbilityActivated();
             }
         }
-        c.rootTurn=c.game.getPhaseHandler().getTurn();c.goalStartedTurn=c.rootTurn;
+        c.rootTurn=c.game.getPhaseHandler().getTurn();c.goalStartedTurn=c.rootTurn;c.initialExchangeOpen=!c.game.getStack().isEmpty();
         for(int i=0;i<2;i++){
             Player p=c.game.getPlayers().get(i);JsonObject h=root.getAsJsonArray("history").get(i).getAsJsonObject();
             for(String name:List.of("numDrawnThisTurn","numDrawnThisDrawStep","numExtraDrawnThisTurn","numDrawnLastTurn"))field(p,name,num(h,name,0));
@@ -278,14 +282,44 @@ public final class EngineWorker {
         c.game.copyLastState();c.logOffset=c.game.getGameLog().getAllEntries().size();
         return c;
     }
+    static void restoreAcererakTrigger(Context c,JsonObject entry,JsonObject original,Player player){
+        require(str(original,"name","").equals("Acererak the Archlich")
+            && str(entry,"sourceCardZone","").equals("Battlefield")
+            && str(entry,"abilityDescription","").startsWith("When Acererak the Archlich enters,")
+            && !bool(entry,"optionalTrigger",false)
+            && (!entry.has("targets")||entry.getAsJsonArray("targets").isEmpty()),"Unsupported root trigger");
+        int sourceId=num(original,"id",-1);
+        Card host=null;
+        for(Card card:player.getCardsIn(ZoneType.Battlefield))if(c.external(card)==sourceId){host=card;break;}
+        require(host!=null&&host.getName().equals("Acererak the Archlich"),"Missing Acererak trigger source");
+        require(player.getCompletedDungeons().isEmpty(),"Unrestored dungeon progress");
+        Trigger trigger=null;
+        for(Trigger candidate:host.getTriggers())if(candidate.getMode()==TriggerType.ChangesZone){
+            require(trigger==null,"Ambiguous Acererak enter trigger");trigger=candidate;
+        }
+        require(trigger!=null&&!trigger.isStatic(),"Missing Acererak enter trigger");
+        SpellAbility template=trigger.getOverridingAbility();
+        SpellAbility ability=template==null?AbilityFactory.getAbility(host,trigger.getParam("Execute")):template.copy(host,player,false,true);
+        require(ability!=null&&!ability.usesTargeting(),"Unexpected Acererak enter trigger");
+        ability.setActivatingPlayer(player);
+        ability.setTrigger(trigger);
+        Map<AbilityKey,Object> params=AbilityKey.mapFromCard(host);
+        params.put(AbilityKey.CardLKI,host);
+        params.put(AbilityKey.Origin,ZoneType.Stack);
+        params.put(AbilityKey.Destination,ZoneType.Battlefield);
+        trigger.setTriggeringObjects(ability,params);
+        c.game.getStack().addAndUnfreeze(new WrappedAbility(trigger,ability,null));
+    }
     static void restoreStack(Context c){
         if(!c.root.has("stack")||c.root.getAsJsonArray("stack").isEmpty())return;
         c.game.getTriggerHandler().setSuppressAllTriggers(true);
         try{
             JsonArray stack=c.root.getAsJsonArray("stack");
             for(int i=stack.size()-1;i>=0;i--){
-                JsonObject entry=stack.get(i).getAsJsonObject();require(!bool(entry,"isAbility",false)&&!bool(entry,"isTrigger",false),"Unrestored stack ability");
+                JsonObject entry=stack.get(i).getAsJsonObject();
                 JsonObject original=entry.getAsJsonObject("sourceCard");Player player=c.seats.get(Integer.parseInt(str(entry,"controllerId",str(original,"controllerId","0"))));
+                if(bool(entry,"isTrigger",false)){restoreAcererakTrigger(c,entry,original,player);continue;}
+                require(!bool(entry,"isAbility",false),"Unrestored stack ability");
                 var paper=StaticData.instance().getCommonCards().getCard(original.get("name").getAsString());require(paper!=null,"Missing stack card");
                 Card card=Card.fromPaperCard(paper,player);c.external.put(card.getId(),original.get("id").getAsInt());
                 SpellAbility sa=card.getFirstSpellAbility();sa.setActivatingPlayer(player);
@@ -307,8 +341,7 @@ public final class EngineWorker {
                         else if(zone.equals("Stack")){for(var item:c.game.getStack())if(c.external(item.getSourceCard())==id){object=item.getSpellAbility();break;}}
                         else for(Card candidate:c.game.getCardsInGame())if(c.external(candidate)==id){object=candidate;break;}
                         if(object==null)continue;
-                        boolean valid=object instanceof SpellAbility?part.canTargetSpellAbility((SpellAbility)object):part.canTarget(object);
-                        if(!valid)continue;
+                        if(!canTarget(part,object))continue;
                         if(object instanceof Player p)part.getTargets().add(p);else if(object instanceof Card cardTarget)part.getTargets().add(cardTarget);else part.getTargets().add((SpellAbility)object);
                         remaining.remove(t--);if(part.isMaxTargetChosen())break;
                     }
@@ -383,13 +416,17 @@ public final class EngineWorker {
     static List<SpellAbility> parts(SpellAbility sa){
         List<SpellAbility> result=new ArrayList<>();for(SpellAbility a=sa;a!=null;a=a.getSubAbility())result.add(a);return result;
     }
+    static boolean canTarget(SpellAbility ability,GameObject target){
+        if(target instanceof SpellAbility stackItem)return ability.getTargetRestrictions().getZone().contains(ZoneType.Stack)&&ability.canTargetSpellAbility(stackItem);
+        return ability.canTarget(target);
+    }
     static void applyTargets(Context ctx,SpellAbility sa,JsonObject action){
         JsonArray targets=action.getAsJsonArray("targets");List<SpellAbility> chain=parts(sa);
         for(int i=0;i<chain.size();i++){
             SpellAbility part=chain.get(i);if(!part.usesTargeting())continue;part.resetTargets();
             JsonArray selected=i<targets.size()?targets.get(i).getAsJsonArray():new JsonArray();
             for(JsonElement e:selected){GameObject object=ctx.target(e.getAsString());
-                require(object instanceof SpellAbility?part.canTargetSpellAbility((SpellAbility)object):part.canTarget(object),"Forge rejected target: "+e.getAsString());
+                require(canTarget(part,object),"Forge rejected target: "+e.getAsString());
                 if(object instanceof Player p)part.getTargets().add(p);else if(object instanceof Card c)part.getTargets().add(c);else part.getTargets().add((SpellAbility)object);
             }
             require(part.isTargetNumberValid(),"Forge rejected target count");
@@ -400,7 +437,7 @@ public final class EngineWorker {
         for(ZoneType zone:List.of(ZoneType.Battlefield,ZoneType.Graveyard,ZoneType.Exile,ZoneType.Command))for(Card c:ctx.game.getCardsIn(zone))if(!c.isFaceDown())objects.add(c);
         for(Card c:actor.getCardsIn(ZoneType.Hand))objects.add(c);
         for(var si:ctx.game.getStack())objects.add(si.getSpellAbility());
-        objects.removeIf(o->{try{return !(o instanceof SpellAbility?sa.canTargetSpellAbility((SpellAbility)o):sa.canTarget(o));}catch(Exception e){return true;}});
+        objects.removeIf(o->{try{return !canTarget(sa,o);}catch(Exception e){return true;}});
         return objects;
     }
     static void targetProducts(Context ctx,Player p,SpellAbility sa,List<SpellAbility> chain,int index,JsonArray targetSets,List<Choice> output,JsonObject description,int limit){

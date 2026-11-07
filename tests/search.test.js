@@ -1,6 +1,7 @@
 'use strict';
 const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),zlib=require('node:zlib');
 const R=require('../replay'),Source=require('../search-source'),{scanMatch,fixDeck,coverGlobalFacts}=require('../match-decks'),{difference,visibleState,paymentText,compileReplay}=require('../forge-replay'),{rankActions,originalSelection}=require('../tree-search');
+const {prepareMatchDecks}=require('../match-decks'),{readDeckPreferences}=require('../deck-service');
 test('engine projection patches preserve keyed identities through movement, removal and reordering',()=>{
  const a={players:[{id:'0',hand:[{id:1,name:'A'},{id:2,name:'B'}],battlefield:[]}],optional:true};
  const b={players:[{id:'0',hand:[{id:2,name:'B',tapped:false}],battlefield:[{id:1,name:'A'}]}]};
@@ -55,6 +56,18 @@ test('widened references use observed extra cards and protect later-game evidenc
  assert.equal(trimmed.main.reduce((n,c)=>n+c.count,0),60);
  assert.equal(trimmed.main.find(c=>c.name==='Ponder').count,4);
  assert.equal(trimmed.main.find(c=>c.name==='Force of Will').count,4);
+});
+test('match preparation uses uploaded and searched references for their respective seats',async()=>{
+ const replay=[{k:'header',seat:1},{k:'key',state:{players:[{id:'0',librarySize:60},{id:'1',librarySize:59,handSize:1,hand:[{id:10,name:'Lightning Bolt',zone:'Hand'}]}]}}].map(row=>JSON.stringify(row)).join('\n');
+ const deckPreferences=readDeckPreferences({0:{mode:'local'},1:{mode:'upload',text:'Main Deck\n1 Lightning Bolt\n30 Mountain\n29 Mountain\n\nSideboard\n1 Pyroblast'}});
+ const resolved=[];
+ const deckService={async resolve(options){resolved.push([options.playerId,options.mode]);return{main:[{name:'Island',count:60}],sideboard:[],sha256:'local',lookup:'local-catalog'};}};
+ const forge={async request({names}){return{cards:names.map(name=>({name,found:true}))};}};
+ const profile=await prepareMatchDecks({model:{sourceText:replay},deckPreferences,deckService,forge,ask(){assert.fail('One game needs no sideboarding.');}});
+ assert.deepEqual(resolved,[['0','local']]);
+ assert.deepEqual(profile.byGame[1][1].main,[{name:'Lightning Bolt',count:1},{name:'Mountain',count:59}]);
+ assert.equal(profile.byGame[1][1].sourceKind,'uploaded');
+ assert.deepEqual(profile.byGame[1][1].adjustments,[]);
 });
 test('real source preserves turn draw/cast history, known top and global recorded sideboarding',{skip:!process.env.REPLAY_SAMPLE},()=>{
  let raw=fs.readFileSync(process.env.REPLAY_SAMPLE);if(raw[0]===31)raw=zlib.gunzipSync(raw);const text=raw.toString('utf8'),a=Source.sourceAt(text,604),b=Source.sourceAt(text,659);

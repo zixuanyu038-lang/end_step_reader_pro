@@ -6,7 +6,8 @@ const {prepareMatchDecks}=require('./match-decks');
 const {routeFromTrace,compileReplay}=require('./forge-replay');
 const {selectWinningLines}=require('./winning-lines');
 const digest=x=>crypto.createHash('sha256').update(x).digest('hex');
-async function ensureMatchDecks({replay,profileDir,deckService,forge,ask,signal,onProgress}){
+async function ensureMatchDecks({replay,profileDir,deckService,forge,ask,signal,onProgress,deckPreferences}){
+  if(deckPreferences)return prepareMatchDecks({model:replay.model,deckService,forge,ask,signal,onProgress,deckPreferences});
   if(replay.matchDecks)return replay.matchDecks;
   const filename=path.join(profileDir,replay.id+'.json');
   try{const cached=JSON.parse(await fs.readFile(filename,'utf8'));if(cached.version===3&&cached.replayId===replay.id){replay.matchDecks={...cached.profile,catalog:new Map(cached.profile.catalog)};return replay.matchDecks;}}catch{}
@@ -44,11 +45,10 @@ async function writeWinningReplays(records,job){
 }
 async function runForgeReview({job,replay,ask,progress,forge,deckService,cacheDir,budget={},nodeLimit=8}){
   const model=replay.model,all=Source.candidates(model.sourceText),directory=path.join(job.dir,'search');await fs.mkdir(directory,{recursive:true});
-  if(!replay.matchDecks){
-    progress(job,'decks','正在读取整盘公开信息，固定双方牌表并分析换备…');
-    replay.matchDecks=await ensureMatchDecks({replay,profileDir:path.join(path.dirname(cacheDir),'deck-profiles'),deckService,forge,signal:job.abort.signal,ask:(prompt,schema,options)=>ask(job,prompt,schema,options),onProgress:message=>progress(job,'decks',message)});
-    await fs.writeFile(path.join(directory,'match-decks.json'),JSON.stringify({...replay.matchDecks,catalog:[...replay.matchDecks.catalog]},null,2));
-  }
+  progress(job,'decks','正在读取整盘公开信息，固定双方牌表并分析换备…');
+  const matchDecks=await ensureMatchDecks({replay,profileDir:path.join(path.dirname(cacheDir),'deck-profiles'),deckService,forge,deckPreferences:job.deckPreferences,signal:job.abort.signal,ask:(prompt,schema,options)=>ask(job,prompt,schema,options),onProgress:message=>progress(job,'decks',message)});
+  const storedDecks={...matchDecks,catalog:[...matchDecks.catalog]};
+  await fs.writeFile(path.join(directory,'match-decks.json'),JSON.stringify(storedDecks,null,2));
   progress(job,'screen','正在通读对局，筛选需要搜索的关键节点…');
   const selected=await ask(job,Protocol.shortlistPrompt(model,all),Schema.shortlist);S.validate(selected,Schema.shortlist);
   const index=new Map(all.map(n=>[n.sourceLine,n])),shortlisted=[];
@@ -67,7 +67,7 @@ async function runForgeReview({job,replay,ask,progress,forge,deckService,cacheDi
     progress(job,'restore',`正在准备第 ${node.game} 局 T${node.turn}：${node.cardName}…`);
     try{
       const source=Source.sourceAt(model.sourceText,node.sourceLine);
-      const prepared={decks:replay.matchDecks.byGame[source.game],catalog:replay.matchDecks.catalog};
+      const prepared={decks:matchDecks.byGame[source.game],catalog:matchDecks.catalog};
       const worlds=buildWorlds(source,prepared,3);
       let last=0;
       const result=await search({client:forge,source,worlds,signal:job.abort.signal,budget,onProgress:p=>{
@@ -117,9 +117,16 @@ async function runForgeReview({job,replay,ask,progress,forge,deckService,cacheDi
       const replacements=new Map(patch.replacements.map(p=>[p.originalSourceLine,p.finding]));for(const g of review.games)g.findings=g.findings.map(f=>replacements.get(f.sourceLine)||f);
     }else review=await ask(job,prompt+'\n上次结果未通过：'+error.message+'。修正结构与引用，不能虚构证据。',S.review);
   }
-  const outcome={review,evidence,unsupported,sideboardPlans:replay.matchDecks.sideboardPlans,deckProfiles:{byGame:replay.matchDecks.byGame,scope:replay.matchDecks.scope},engine:'forge-2.0.15',reviewVersion:'forge-search-v2-wins',completedAt:new Date().toISOString()};
-  await fs.mkdir(cacheDir,{recursive:true});await fs.writeFile(path.join(cacheDir,replay.id+'.json'),JSON.stringify(outcome,null,2));
-  replay.review=review;replay.searchEvidence=evidence;replay.unsupportedNodes=unsupported;
+  const outcome={review,evidence,unsupported,sideboardPlans:matchDecks.sideboardPlans,deckProfiles:{byGame:matchDecks.byGame,scope:matchDecks.scope},engine:'forge-2.0.15',reviewVersion:'forge-search-v2-wins',completedAt:new Date().toISOString()};
+  job.abort.signal.throwIfAborted();
+  await fs.mkdir(cacheDir,{recursive:true});
+  const cacheFile=path.join(cacheDir,replay.id+'.json'),temporary=cacheFile+'.'+job.id+'.tmp';
+  try{
+    await fs.writeFile(temporary,JSON.stringify({...outcome,matchDecks:storedDecks},null,2));
+    job.abort.signal.throwIfAborted();
+    await fs.rename(temporary,cacheFile);
+  }finally{await fs.rm(temporary,{force:true}).catch(()=>{});}
+  replay.review=review;replay.searchEvidence=evidence;replay.unsupportedNodes=unsupported;replay.matchDecks=matchDecks;
   job.result={...outcome,reviewPending:false,reviewRevision:job.result.reviewRevision+1,gameStages:games.map(game=>({game,message:`已完成 ${records.filter(r=>r.source.game===game).length} 个搜索节点`}))};
   return outcome;
 }
