@@ -6,26 +6,79 @@ const digest=x=>crypto.createHash('sha256').update(typeof x==='string'?x:JSON.st
 const zones={hand:'Hand',battlefield:'Battlefield',graveyard:'Graveyard',exile:'Exile',library:'Library'};
 const hidden=c=>c.faceDown||!c.name||c.name==='Hidden card';
 const stateCards=s=>s.players.flatMap(p=>['hand','battlefield','graveyard','exile','commandZone'].flatMap(z=>p[z]||[])).concat((s.stack||[]).map(x=>x.sourceCard).filter(Boolean));
+// Lab exports record engine events with state transitions, without client submissions.
+const isLabReplay=header=>header.labMeta?.format==='legacy-energy-lab'&&header.labMeta.version===1;
+function labAnchors(rows){
+  const result=new Map(),header=rows[0].row;
+  if(!isLabReplay(header))return result;
+  let state=null,previous=null,stateRow=null,move=null;
+  for(const x of rows.slice(1)){
+    const r=x.row,e=r.event;
+    if(r.k==='chapter'){move=null;previous=null;stateRow=null;if(r.edge==='start')state=null;}
+    if(r.k==='key'||r.k==='diff'){previous=state;state=r.k==='key'?r.state:R.patch(state,r.patch);stateRow=x;}
+    if(e?.type==='CARD_ZONE_CHANGE'&&e.cardId!=null&&['Stack','Battlefield'].includes(e.toZone)){
+      const actor=String(e.playerIndex??e.zoneOwnerIndex??header.seat);
+      const zone={Hand:'hand',Graveyard:'graveyard',Exile:'exile'}[e.fromZone];
+      const from=s=>zone&&s?.players.find(p=>String(p.id)===actor)?.[zone]?.find(c=>String(c.id)===String(e.cardId));
+      const stillBefore=!!from(state),before=stillBefore?state:stateRow?.row.t===r.t?previous:null;
+      const anchor=stillBefore?x:stateRow;
+      const card=from(before);
+      move=card&&['Hand','Graveyard','Exile'].includes(e.fromZone)&&before.status==='ACTIVE'&&String(before.priorityPlayerId)===actor
+        ?{line:anchor.line,t:anchor.row.t,state:before,card,actor,to:e.toZone,turn:before.turnNumber,phase:before.phase}:null;
+    }
+    if(e?.type==='TURN_BEGAN'||e?.type==='TURN_PHASE'||e?.type==='SPELL_RESOLVED')move=null;
+    if(e?.type==='SPELL_CAST'||e?.type==='LAND_PLAYED'){
+      if(move&&String(e.playerIndex)===move.actor&&move.actor===String(header.seat)&&String(e.cardId)===String(move.card.id)&&
+        String(state.turnNumber)===String(move.turn)&&state.phase===move.phase&&(e.type==='SPELL_CAST'?'Stack':'Battlefield')===move.to){
+        const stack=e.type==='SPELL_CAST'?state.stack.find(item=>String(item.sourceCard?.id)===String(e.cardId)):null;
+        if(e.type==='LAND_PLAYED'||stack)result.set(x.line,{...move,kind:stack?'cast':'play_land',targets:stack?.targets});
+      }
+      move=null;
+    }
+  }
+  return result;
+}
 function sourceAt(text,selectedLine){
   const rows=text.replace(/^\uFEFF/,'').split(/\r?\n/).map((raw,i)=>({raw,line:i+1})).filter(x=>x.raw.trim()).map(x=>({...x,row:JSON.parse(x.raw)}));
-  const chosen=rows.find(x=>x.line===selectedLine);if(!chosen||!['event','action'].includes(chosen.row.k))throw Error('分支必须指向原局中的操作或事件。');
+  const chosen=rows.find(x=>x.line===selectedLine);if(!chosen||!['event','action','key','diff'].includes(chosen.row.k))throw Error('分支必须指向原局中的操作或优先权快照。');
+  const isSnapshot=['key','diff'].includes(chosen.row.k);
   let anchor=chosen;
+  const inferred=labAnchors(rows).get(selectedLine);
+  if(inferred)anchor=rows.find(x=>x.line===inferred.line);
   // A local submitted action is a more precise pre-cast anchor than a later server event.
   const e=chosen.row.event,own=String(e?.playerIndex)===String(rows[0].row.seat);
-  if(own&&['SPELL_CAST','ABILITY_ACTIVATED','LAND_PLAYED'].includes(e?.type)){
+  if(!inferred&&own&&['SPELL_CAST','ABILITY_ACTIVATED','LAND_PLAYED'].includes(e?.type)){
     const candidates=rows.filter(x=>x.line<selectedLine&&x.row.k==='action'&&x.row.action.type==='PLAY_CARD'&&x.row.t<=chosen.row.t&&chosen.row.t-x.row.t<15000);
     const prior=candidates.at(-1);if(prior&&(e.cardId==null||String(prior.row.action.cardId)===String(e.cardId)))anchor=prior;
   }
+  const boundary=anchor.line+(isSnapshot?1:0);
   let state=null,game=1;const known=new Map(),history=[];
   for(const x of rows.slice(1)){
-    if(x.line>=anchor.line)break;
+    if(x.line>=boundary)break;
     if(x.row.k==='chapter'&&x.row.edge==='start')game=x.row.game;
     if(x.row.k==='key')state=x.row.state;else if(x.row.k==='diff')state=R.patch(state,x.row.patch);
     if(state)for(const c of stateCards(state).concat(state.pendingAction?.cardOptions||[],state.players.flatMap(p=>p.libraryTop||[])))if(!hidden(c))known.set(String(c.id),clone(c));
     if(x.row.k==='event')history.push({sourceLine:x.line,t:x.row.t,event:x.row.event});
   }
+  if(inferred)state=inferred.state;
+  let inferredAction=inferred?{kind:inferred.kind,cardId:inferred.card.id,targets:inferred.targets}:null;
+  if(!inferredAction&&rows[0].row.branchMeta?.sourceKind==='description'&&anchor!==chosen&&e?.type==='SPELL_CAST'){
+    let recorded=state;
+    for(const x of rows){
+      if(x.line<=anchor.line||x.line>=chosen.line)continue;
+      if(x.row.k==='key')recorded=x.row.state;else if(x.row.k==='diff')recorded=R.patch(recorded,x.row.patch);
+    }
+    const stack=recorded?.stack.find(s=>String(s.sourceCard?.id)===String(e.cardId));
+    if(stack)inferredAction={kind:'cast',cardId:e.cardId,targets:stack.targets};
+  }
   if(!state||state.status!=='ACTIVE'||state.sideboarding)throw Error('该节点没有可恢复的进行中局面。');
-  return{rows,header:rows[0].row,baseline:clone(state),game,known:[...known.values()],history,anchor:{line:anchor.line,selectedLine,t:anchor.row.t,game,turn:Number(state.turnNumber)||0},sha256:digest(text)};
+  if(isSnapshot){
+    const own=String(state.priorityPlayerId)===String(rows[0].row.seat);
+    const reported=chosen.row.k==='key'||Object.hasOwn(chosen.row.patch?.o||{},'priorityPromptVersion');
+    if(own&&state.pendingAction?.type!=='PRIORITY'||!own&&(!reported||!Number(state.priorityPromptVersion)))
+      throw Error('这条快照没有记录该玩家的优先权。');
+  }
+  return{rows,header:rows[0].row,inferredAction,baseline:clone(state),game,known:[...known.values()],history,anchor:{line:boundary,selectedLine,t:anchor.row.t,game,turn:Number(state.turnNumber)||0},sha256:digest(text)};
 }
 function cleanCard(template,id,playerId,zone){return{...clone(template),id,ownerId:playerId,controllerId:playerId,zone:zones[zone],faceDown:false,tapped:false,isTapped:false,isToken:false,damage:0,counters:{},chosenMarks:[],stateNotes:[],attachedCards:[],hasSummoningSickness:zone==='battlefield',isAttacking:false,isBlocking:false,isPhasedOut:false};}
 function initialization(plan){return{assumptions:plan.assumptions,hiddenHands:plan.hiddenHands,libraries:plan.libraries};}
@@ -182,4 +235,4 @@ async function compile(source,plan,catalog,{frozen=null}={}){
     return{jsonl,trace,header,initialization:initialization(plan),state:s};
   }catch(error){error.step=activeStep;error.initialization=initialization(plan);error.trace=trace;throw error;}
 }
-module.exports={sourceAt,compile,initialization,digest};
+module.exports={isLabReplay,labAnchors,sourceAt,compile,initialization,digest};

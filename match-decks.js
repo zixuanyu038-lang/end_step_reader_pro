@@ -1,7 +1,7 @@
 'use strict';
 const crypto=require('node:crypto');
 const R=require('./replay');
-const {canonicalName,DeckLookupError}=require('./deck-service');
+const {canonicalName,DeckLookupError,readDeckPreferences}=require('./deck-service');
 const Schema=require('./search-schema'),{validate}=require('./studio-schema');
 const hash=x=>crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex');
 const counts=names=>{const result=new Map();for(const name of names)result.set(name,(result.get(name)||0)+1);return[...result].map(([name,count])=>({name,count}));};
@@ -147,10 +147,39 @@ function readManualSideboard(value){
     return {game:entry.game,playerId:entry.playerId,ins,outs,manual:true,reason:'玩家指定换备',uncertainties:[]};
   });
 }
+function descriptionDeckPreferences(header){
+  const meta=header.branchMeta;
+  if(meta?.format!=='endstep-forge-search-branch'||meta.version!==1||meta.sourceKind!=='description'||!Array.isArray(meta.assumptions))return null;
+  try{
+    const inputs=Object.fromEntries(['0','1'].map(id=>{
+      const matches=meta.assumptions.filter(a=>a?.id==='deck-'+id&&String(a.playerId)===id);
+      if(matches.length!==1)throw Error('Missing branch deck');
+      const {mainDeck,sideboard}=matches[0];
+      const encode=cards=>{
+        if(!Array.isArray(cards)||cards.length>150)throw Error('Invalid branch deck');
+        return cards.map(c=>{
+          if(!Number.isInteger(c?.count)||c.count<1||typeof c.name!=='string'||/[\r\n;|]/.test(c.name))throw Error('Invalid branch deck card');
+          return c.count+' '+c.name;
+        }).join('\n');
+      };
+      return [id,{mode:'upload',text:encode(mainDeck)+'\nSideboard\n'+encode(sideboard)}];
+    }));
+    const preferences=readDeckPreferences(inputs);
+    for(const {deck} of Object.values(preferences))Object.assign(deck,{
+      sourceKind:'branch-deck',archetype:'推演使用的牌表',basis:'来自此 Forge 推演文件的牌表；已核对记录中的牌名、张数和可见牌。'
+    });
+    return preferences;
+  }catch{return null;}
+}
 async function prepareMatchDecks({model,deckService,forge,ask,signal,deckPreferences=null,manualSideboard=[],onProgress=()=>{}}){
   const scanned=scanMatch(model.sourceText),bases=[];
   const first=[...scanned.games.values()][0];
   if(!first)throw Error('回放没有可用于核对起始牌表的对局。');
+  const embedded=descriptionDeckPreferences(scanned.header);
+  if(embedded){
+    deckPreferences={...deckPreferences};
+    for(const id of ['0','1'])if(!deckPreferences[id]||deckPreferences[id].mode==='local')deckPreferences[id]=embedded[id];
+  }
   const allowWeb=!deckPreferences||Object.values(deckPreferences).some(p=>p.mode==='web');
   const label=id=>String(id)===String(scanned.header.seat)?'己方':'对手';
   for(const player of scanned.global){
@@ -238,4 +267,4 @@ async function prepareMatchDecks({model,deckService,forge,ask,signal,deckPrefere
   });
   return{byGame,catalog,bases:fixedBases,sideboardPlans:plans,manualSideboard,scope:scanned.scope,globalObserved:scanned.global};
 }
-module.exports={scanMatch,fixDeck,coverGlobalFacts,prepareMatchDecks,readManualSideboard};
+module.exports={scanMatch,fixDeck,coverGlobalFacts,prepareMatchDecks,readManualSideboard,descriptionDeckPreferences};

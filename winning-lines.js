@@ -1,6 +1,6 @@
 'use strict';
 const {isDeepStrictEqual}=require('node:util');
-const Schema=require('./search-schema'),S=require('./studio-schema'),{originalSelection}=require('./tree-search');
+const Schema=require('./search-schema'),S=require('./studio-schema'),{mapSearchWorlds,originalSelection}=require('./tree-search');
 const {verifyPair}=require('./paired-review');
 const won=(run,viewer)=>run.stopReason==='game_over'&&run.state.status==='COMPLETE'&&String(run.state.winnerId)===String(viewer);
 const summarize=run=>({stopReason:run.stopReason,winnerId:run.state.winnerId??null,turn:run.state.turnNumber,features:run.evaluation.features,actions:(run.executed||[]).slice(0,120)});
@@ -16,16 +16,16 @@ async function selectWinningLines({records,forge,ask,signal,onProgress=()=>{}}){
  for(const record of records){
   const {source,result,worlds,node}=record,candidates=finalists(result);pools.set(node.sourceLine,candidates);
   if(!candidates.length){result.quality={keep:false,reason:'搜索预算内没有找到满足意图的引擎胜局。',risks:[],confidence:'low'};continue;}
-  onProgress('已筛出胜局，正在同世界核对原打法…');const baselines=[];
-  for(const world of worlds){
+  onProgress('已筛出胜局，正在同世界核对原打法…');
+  const baselines=await mapSearchWorlds(forge,worlds,async (world,index,worker)=>{
    const root={...world.root};delete root.intent;
    try{
-    const expanded=await forge.request({command:'expand',root},{signal}),original=originalSelection(source,expanded.actions);
-    if(!original.matched){baselines.push({worldId:world.id,unavailable:original.reason});continue;}
-    const run=await forge.request({command:'simulate',root,path:[original.action],includeTrace:false,horizonTurns:100,maxChoices:2000,maxSteps:4000},{signal});
-    baselines.push({worldId:world.id,...summarize(run)});
-   }catch(e){if(signal?.aborted)throw e;baselines.push({worldId:world.id,unavailable:e.message});}
-  }
+    const expanded=await worker.request({command:'expand',root},{signal}),original=originalSelection(source,expanded.actions);
+    if(!original.matched)return {worldId:world.id,unavailable:original.reason};
+    const run=await worker.request({command:'simulate',root,path:[original.action],includeTrace:false,horizonTurns:100,maxChoices:2000,maxSteps:4000},{signal});
+    return {worldId:world.id,...summarize(run)};
+   }catch(e){signal?.throwIfAborted();return {worldId:world.id,unavailable:e.message};}
+  },signal);
   result.originalBaselines=baselines;result.qualityFinalists=candidates.map(c=>c.id);
   const losingSeen=new Set(),counterexamples=(result.runs||[]).flatMap(w=>w.simulations.filter(s=>s.terminal&&s.winnerId!=null&&String(s.winnerId)!==String(source.header.seat)).map(s=>({worldId:w.worldId,path:s.path,turn:s.turn,winnerId:s.winnerId}))).filter(s=>{const key=JSON.stringify([s.worldId,s.path]);if(losingSeen.has(key))return false;losingSeen.add(key);return true;}).slice(0,12);
   facts.push({sourceLine:node.sourceLine,game:source.game,viewerId:String(source.header.seat),question:node.question,root:source.baseline,originalBaselines:baselines,baselineScope:'Only the recorded root action is fixed; later decisions, payments and Brainstorm returns use the engine policy, not the actual replay future.',rootComparisons:result.alternatives||[],counterexamples,worlds:worlds.map(w=>({id:w.id,scenario:w.scenario,hiddenHands:w.hiddenHands})),candidates:candidates.map(c=>({id:c.id,worldId:c.worldId,path:c.path,terminalTurn:c.turn,features:c.features,actions:c.executed.slice(0,120)}))});

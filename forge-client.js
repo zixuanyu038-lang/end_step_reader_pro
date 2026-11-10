@@ -3,12 +3,15 @@ const fs=require('node:fs/promises'),path=require('node:path'),crypto=require('n
 const {spawn,execFile}=require('node:child_process');
 const {promisify}=require('node:util');
 const {createInterface}=require('node:readline');
+const {availableParallelism,totalmem,freemem}=require('node:os');
 const {baseEngine,readForgeSelection}=require('./forge-runtime');
-const execute=promisify(execFile);
+const execute=promisify(execFile),compilations=new Map();
 class ForgeClient {
-  constructor({runtimeDir=process.env.ENDSTEP_FORGE_RUNTIME||path.join(process.env.LOCALAPPDATA||process.env.HOME||'.','EndstepForgeProbe'),dataDir=path.join(__dirname,'.endstep-data'),timeoutMs=180000,release=readForgeSelection(dataDir)}={}){
+  constructor({runtimeDir=process.env.ENDSTEP_FORGE_RUNTIME||path.join(process.env.LOCALAPPDATA||process.env.HOME||'.','EndstepForgeProbe'),dataDir=path.join(__dirname,'.endstep-data'),timeoutMs=180000,release=readForgeSelection(dataDir),javaHeap='3g',activeProcessors}={}){
     this.runtimeDir=runtimeDir;this.dataDir=dataDir;this.timeoutMs=timeoutMs;this.sequence=0;this.pending=new Map();this.queue=Promise.resolve();this.closed=false;
     this.java=path.join(runtimeDir,'jdk','jdk-17.0.20.1+1','bin','java.exe');
+    this.javaHeap=javaHeap;
+    this.activeProcessors=activeProcessors;
     this.javac=path.join(runtimeDir,'jdk','jdk-17.0.20.1+1','bin','javac.exe');
     this.engine=release?.engine||baseEngine;
     this.cacheKey=release?this.engine+'-'+release.sha256:null;
@@ -27,18 +30,14 @@ class ForgeClient {
   async start(){
     if(this.closed)throw Error('Forge 执行器已关闭。');
     const status=await this.status();if(!status.installed)throw Error('Forge 运行环境尚未准备，请先运行 Forge 安装步骤。');
-    await fs.mkdir(this.classes,{recursive:true});
-    const source=path.join(__dirname,'forge','EngineWorker.java');
-    const digest=crypto.createHash('sha256').update(await fs.readFile(source)).digest('hex');
-    let compiled='';try{compiled=await fs.readFile(path.join(this.classes,'source.sha256'),'utf8');}catch{}
-    if(compiled!==digest){
-      try{await execute(this.javac,['-encoding','UTF-8','-cp',this.jar,'-d',this.classes,source],{windowsHide:true,timeout:60000,maxBuffer:2*1024*1024});}
-      catch(e){throw Error('Forge 适配器编译失败：'+String(e.stderr||e.message).slice(0,4000));}
-      await fs.writeFile(path.join(this.classes,'source.sha256'),digest);
-    }
+    if(!compilations.has(this.classes))compilations.set(this.classes,this.compile().finally(()=>compilations.delete(this.classes)));
+    await compilations.get(this.classes);
+    if(this.closed)throw Error('Forge 执行器已关闭。');
     const profile=path.join(this.forgeDir,'forge.profile.properties');
     try{await fs.writeFile(profile,'userDir=./probe-user\ncacheDir=./probe-cache\n',{flag:'wx'});}catch(e){if(e.code!=='EEXIST')throw e;}
-    const child=spawn(this.java,['-Xmx3g','-Djava.awt.headless=true','-Dfile.encoding=UTF-8','-cp',this.classes+path.delimiter+this.jar,'EngineWorker',this.engine],{cwd:this.forgeDir,windowsHide:true,stdio:['pipe','pipe','pipe']});this.process=child;
+    const jvmOptions=['-Xmx'+this.javaHeap];
+    if(this.activeProcessors)jvmOptions.push('-XX:ActiveProcessorCount='+this.activeProcessors);
+    const child=spawn(this.java,[...jvmOptions,'-Djava.awt.headless=true','-Dfile.encoding=UTF-8','-cp',this.classes+path.delimiter+this.jar,'EngineWorker',this.engine],{cwd:this.forgeDir,windowsHide:true,stdio:['pipe','pipe','pipe']});this.process=child;
     const logDir=path.join(this.dataDir,'forge');await fs.mkdir(logDir,{recursive:true});
     this.logFile=path.join(logDir,'worker.log');
     child.stderr.on('data',b=>fs.appendFile(this.logFile,b).catch(()=>{}));child.stdin.on('error',()=>{});
@@ -60,6 +59,17 @@ class ForgeClient {
     });
     this.lastError=null;return this;
   }
+  async compile(){
+    await fs.mkdir(this.classes,{recursive:true});
+    const source=path.join(__dirname,'forge','EngineWorker.java');
+    const digest=crypto.createHash('sha256').update(await fs.readFile(source)).digest('hex');
+    let compiled='';try{compiled=await fs.readFile(path.join(this.classes,'source.sha256'),'utf8');}catch{}
+    if(compiled!==digest){
+      try{await execute(this.javac,['-encoding','UTF-8','-cp',this.jar,'-d',this.classes,source],{windowsHide:true,timeout:60000,maxBuffer:2*1024*1024});}
+      catch(e){throw Error('Forge 适配器编译失败：'+String(e.stderr||e.message).slice(0,4000));}
+      await fs.writeFile(path.join(this.classes,'source.sha256'),digest);
+    }
+  }
   fail(error){this.connection=null;for(const p of this.pending.values()){clearTimeout(p.timer);p.reject(error);}this.pending.clear();}
   async request(input,{signal}={}){
     const operation=async()=>{
@@ -79,4 +89,62 @@ class ForgeClient {
   }
   close(){this.closed=true;this.process?.kill();this.fail(Error('Forge 执行器已关闭。'));}
 }
-module.exports={ForgeClient};
+function defaultWorkers(){
+  const configured=Number(process.env.ENDSTEP_FORGE_WORKERS);
+  if(Number.isInteger(configured)&&configured>=1&&configured<=3)return configured;
+  const gib=2**30,cores=availableParallelism();
+  if(cores>=8&&totalmem()>=24*gib&&freemem()>=9*gib)return 3;
+  if(cores>=4&&totalmem()>=14*gib&&freemem()>=6*gib)return 2;
+  return 1;
+}
+class ForgePool {
+  constructor({workers=defaultWorkers(),...options}={}){
+    this.workers=Array.from({length:workers},()=>new ForgeClient(options));
+    this.primary=this.workers[0];
+    this.parallelism=this.workers.length;
+    this.probes=new Map();this.probeBytes=0;
+    this.engine=this.primary.engine;this.cacheKey=this.primary.cacheKey;
+  }
+  get rules(){return this.primary.rules;}
+  async status(){return {...await this.primary.status(),workers:this.workers.length};}
+  request(input,options){return this.primary.request(input,options);}
+  async searchProbe(input,{signal}={},worker=this.primary){
+    signal?.throwIfAborted();
+    const key=crypto.createHash('sha256').update(JSON.stringify(input)).digest('hex');
+    const entry=this.probes.get(key);
+    if(entry){
+      this.probes.delete(key);this.probes.set(key,entry);
+      return {result:entry.result,reused:true};
+    }
+    const result=await worker.request(input,{signal});
+    signal?.throwIfAborted();
+    const bytes=Buffer.byteLength(JSON.stringify(result));
+    const limit=16*1024*1024;
+    if(bytes<=limit&&!this.probes.has(key)){
+      while(this.probes.size>=2048||this.probeBytes+bytes>limit){
+        const oldest=this.probes.keys().next().value;
+        this.probeBytes-=this.probes.get(oldest).bytes;this.probes.delete(oldest);
+      }
+      this.probes.set(key,{result,bytes});this.probeBytes+=bytes;
+    }
+    return {result,reused:false};
+  }
+  async mapWorlds(worlds,visit,signal){
+    let next=0,failure;
+    const results=new Array(worlds.length);
+    const run=async worker=>{
+      while(next<worlds.length&&!failure){
+        const index=next++;
+        try{
+          signal?.throwIfAborted();
+          results[index]=await visit(worlds[index],index,worker);
+        }catch(error){failure??=error;}
+      }
+    };
+    await Promise.all(this.workers.slice(0,worlds.length).map(run));
+    if(failure)throw failure;
+    return results;
+  }
+  close(){for(const worker of this.workers)worker.close();this.probes.clear();this.probeBytes=0;}
+}
+module.exports={ForgeClient,ForgePool};

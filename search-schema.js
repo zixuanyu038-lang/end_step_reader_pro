@@ -12,4 +12,5 @@ const intent=object({understoodIntent:text,supported:boolean,issues:array(text),
 const converterIntent=object({...intent.properties,goals:array(object({...goal.properties,timing:enumeration('at_start','in_order')}))});
 const sideboarding=object({plans:array(object({game:integer,playerId:text,swaps:array(object({inName:text,outName:text,count:{type:'integer',minimum:1,maximum:15}})),reason:text,uncertainties:array(text)}))});
 const winningSelection=object({selections:array(object({sourceLine:integer,candidateId:text,keep:boolean,reason:text,risks:array(text),confidence:enumeration('medium','low')}))});
-module.exports={deck,deckSelection,shortlist,intent,converterIntent,sideboarding,winningSelection,object,array,text,integer,boolean,enumeration};
+const turningTests=object({tests:array(object({sourceLine:integer,testId:text,reason:text}))});
+module.exports={turningTests,deck,deckSelection,shortlist,intent,converterIntent,sideboarding,winningSelection,object,array,text,integer,boolean,enumeration};

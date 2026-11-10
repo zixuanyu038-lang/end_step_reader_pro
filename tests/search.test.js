@@ -96,3 +96,57 @@ test('real source preserves turn draw/cast history, known top and global recorde
  assert.equal(a.historyCounters[1].numDrawnThisTurn,1);assert.deepEqual(a.knownTop['1'],[105]);assert.equal(b.historyCounters[1].numDrawnThisTurn,4);assert.deepEqual(b.historyCounters.map(p=>p.spellsCastThisTurn),[1,1]);assert.deepEqual(b.knownTop['1'],[81,115]);
  const match=scanMatch(text);assert.equal(match.recorded.get('1:1').main.reduce((n,c)=>n+c.count,0),60);assert.equal(match.recorded.get('2:1').main.reduce((n,c)=>n+c.count,0),60);assert.ok(!JSON.stringify(match.global).includes('The Monarch'));assert.equal(Source.candidates(text).find(n=>n.anchorLine===604).sourceLine,609);
 });
+
+test('engine-only records anchor before the transition and keep the recorded spell target',()=>{
+ const card={id:7,name:'Lightning Bolt',ownerId:'1',controllerId:'1',zone:'Hand'};
+ const players=['0','1'].map(id=>({id,life:20,hand:id==='1'?[card]:[],handSize:Number(id),librarySize:50,battlefield:[],graveyard:[],exile:[],drawnThisTurn:0}));
+ const state={turnNumber:3,status:'ACTIVE',phase:'MAIN1',activePlayerId:'1',priorityPlayerId:'1',players,stack:[]};
+ const after={...state,players:[players[0],{...players[1],hand:[],handSize:0}],
+   stack:[{sourceCard:{...card,zone:'Stack'},targets:[{id:-1,zone:'Player',ownerId:'0'}]}]};
+ const rows=[{seat:1,labMeta:{format:'legacy-energy-lab',version:1}},
+   {k:'chapter',game:1,edge:'start',t:0},{k:'key',state,t:1},{k:'key',state:after,t:2},
+   {k:'event',t:2,event:{type:'CARD_ZONE_CHANGE',cardId:7,fromZone:'Hand',toZone:'Stack'}},
+   {k:'event',t:3,event:{type:'SPELL_CAST',cardId:7,playerIndex:'1'}}];
+ const text=rows.map(r=>JSON.stringify(r)).join('\n');
+ const [node]=Source.candidates(text);
+ assert.equal(node.anchorLine,4);
+ assert.equal(node.sourceLine,6);
+ const source=Source.sourceAt(text,node.sourceLine);
+ assert.deepEqual(source.baseline,state);
+ assert.equal(source.history.length,0);
+ const actions=['p:0','p:1'].map(key=>({kind:'cast',cardId:7,key,targets:[[key]]}));
+ assert.equal(originalSelection(source,actions).key,'p:0');
+ rows[5].event.cardId=8;
+ assert.equal(Source.candidates(rows.map(r=>JSON.stringify(r)).join('\n')).length,0);
+});
+test('a declared companion is reserved from the sideboard and leaves main deck size unchanged',()=>{
+ const name='Yorion, Sky Nomad',id='1';
+ const companion={id:81,name,zone:'Command',ownerId:id,controllerId:id,isCompanion:true};
+ const effect={id:82,name:name+"'s Companion Effect",zone:'Command',ownerId:id,controllerId:id};
+ const players=['0','1'].map((id,i)=>({id,name:id,life:20,hand:[],librarySize:80,commandZone:i?[companion,effect]:[]}));
+ const source={header:{seat:1},known:[companion],historyCounters:[{},{}],initialDeckSizes:{0:80,1:80},
+   baseline:{turnNumber:1,phase:'MAIN1',activePlayerId:id,priorityPlayerId:id,stack:[],players}};
+ const main=[{name:'Island',count:80}],deck={main,sideboard:[],verified:true,fixedForGame:true};
+ const sideboard=[{name,count:1}];
+ const world=buildWorld(source,[deck,{...deck,sideboard}],new Map(),1);
+ assert.equal(world.libraries[1].cards.length,80);
+ assert.equal(world.root.statuses[1].companion.id,81);
+ assert.deepEqual(world.root.decks[1].sideboard,[]);
+ assert.deepEqual(world.assumptions[1].sideboard,sideboard);
+ assert.throws(()=>buildWorld(source,[deck,deck],new Map(),1),/行侣与备牌/);
+});
+
+test('opening and mulligan moves do not block turn one while ambiguous in-turn moves still do',()=>{
+ const players=['0','1'].map(id=>({id,life:20,hand:[],handSize:0,librarySize:60,battlefield:[],graveyard:[],exile:[]}));
+ const start={status:'ACTIVE',turnNumber:0,phase:'UNKNOWN',activePlayerId:'1',priorityPlayerId:'1',players,stack:[]};
+ const row=(type,extra={})=>({k:'event',event:{type,playerIndex:'1',...extra}});
+ const move=row('CARD_ZONE_CHANGE',{zoneOwnerIndex:'1',fromZone:'Library',toZone:'Hand'});
+ const rows=[{seat:1},{k:'chapter',game:1,edge:'start'}, {k:'key',state:start},row('GAME_STARTED'),move,row('MULLIGAN'),move,
+   row('TURN_BEGAN',{turnNumber:1}),{k:'key',state:{...start,turnNumber:1,phase:'MAIN1'}},row('TURN_PHASE',{phase:'MAIN1'}),row('LAND_PLAYED')];
+ const text=()=>rows.map((r,t)=>JSON.stringify({...r,t})).join('\n');
+ const source=Source.sourceAt(text(),rows.length);
+ assert.deepEqual(source.historyUncertainties,[]);
+ assert.equal(source.historyCounters[1].numDrawnThisTurn,0);
+ rows.splice(-1,0,move);
+ assert.match(Source.sourceAt(text(),rows.length).historyUncertainties[0],/抓牌还是找牌/);
+});

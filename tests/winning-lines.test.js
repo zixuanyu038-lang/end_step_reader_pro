@@ -45,3 +45,19 @@ test('AI cannot select an absent candidate or retain a victory that fails determ
  await assert.rejects(()=>selectWinningLines({records:[record()],forge,ask:answer('win')}),/未能稳定重放/);
  const r=record();r.result.winningCandidates.push({...r.result.winningCandidates[0],id:'duplicate'});assert.equal(finalists(r.result).length,1);
 });
+
+test('the Forge probe cache keys on the full hidden world and the continuation budget',async()=>{
+ const {ForgePool}=require('../forge-client');
+ const pool=new ForgePool({workers:2});
+ try{
+  let calls=0;
+  const worker={async request(){return {sample:++calls};}};
+  const input={command:'simulate',searchProbe:true,root:{seed:7,stateText:'p0hand=Brainstorm'},path:[{key:'pass:0'}],horizonTurns:5};
+  assert.deepEqual(await pool.searchProbe(input,{},worker),{result:{sample:1},reused:false});
+  assert.deepEqual(await pool.searchProbe(structuredClone(input),{},worker),{result:{sample:1},reused:true});
+  assert.equal((await pool.searchProbe({...input,horizonTurns:6},{},worker)).reused,false);
+  assert.equal((await pool.searchProbe({...input,root:{...input.root,stateText:'p0hand=Daze'}},{},worker)).reused,false);
+  await assert.rejects(pool.searchProbe(input,{signal:AbortSignal.abort()},worker),{name:'AbortError'});
+  assert.equal(calls,3);
+ }finally{pool.close();}
+});

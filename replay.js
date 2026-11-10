@@ -154,7 +154,13 @@
         else if(r.edge==='end'){if(current){current.end=r.t;current.outcome=r.outcome;}between=true;}
         continue;
       }
-      if(r.k==='action'){model.actionCount++;continue;}
+      if(r.k==='action'){
+        model.actionCount++;
+        if(r.action?.type==='PASS_PRIORITY'&&current&&!between&&stateIndex>=0)
+          current.entries.push({sourceLine:lineNo+1,t:r.t||0,type:'PASS_PRIORITY',kind:'优先权',
+            phase:phase(state?.step||state?.phase),text:'让过优先权',quiet:true,stateIndex,raw:r.action,rawRecord:lines[lineNo]});
+        continue;
+      }
       if(r.k!=='event'){model.warnings.push(`第 ${lineNo+1} 行记录类型 ${r.k} 未识别，未解释。`);continue;}
       const e=r.event;if(!e||typeof e!=='object')throw Error(`第 ${lineNo+1} 行缺少事件对象。`);
       model.eventCount++;

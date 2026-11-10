@@ -1,8 +1,8 @@
 'use strict';
 const fs=require('node:fs/promises'),path=require('node:path'),crypto=require('node:crypto');
-const Source=require('./search-source'),Schema=require('./search-schema'),S=require('./studio-schema');
+const Source=require('./search-source'),{isLabReplay}=require('./scenario'),Schema=require('./search-schema'),S=require('./studio-schema');
 const {ensureMatchDecks,buildWorlds,compactEvidence}=require('./search-review');
-const {auditRoot}=require('./hidden-worlds'),{search,originalSelection}=require('./tree-search');
+const {auditRoot,auditObservedAction}=require('./hidden-worlds'),{search,originalSelection}=require('./tree-search');
 const {compileReplay,routeFromTrace,paymentText}=require('./forge-replay');
 const {selectWinningLines}=require('./winning-lines');
 function intentPrompt(source,finding,focus,inspection,context='',strictTiming=false){
@@ -23,12 +23,15 @@ function planView(intent,preview,finding,viewerId='1'){
     proposedLine,assumptionsNeeded:['手牌与未知库序使用固定假设；牌表与换备方案固定。',...intent.constraints],intentStatus:preview.intentStatus};
 }
 async function inspectBranchStart({source,profiles,forge,signal,stressCards=[]}){
+  if(isLabReplay(source.header)&&!source.inferredAction)
+    throw Object.assign(Error('这条研究事件缺少可核对的操作前快照。可从较早的已校验操作开始。'),{code:'unsupported_root'});
   const prepared={decks:profiles.byGame[source.game],catalog:profiles.catalog};
   if(!prepared.decks)throw Object.assign(Error('这局还没有可用的牌表。请先准备对局。'),{code:'branch_not_ready'});
   const worlds=buildWorlds(source,prepared,3,stressCards);
   const inspection=await forge.request({command:'expand',root:worlds[0].root},{signal});
   auditRoot(source,inspection.state);
   if(inspection.stopReason!=='decision')throw Object.assign(Error('Forge 未能恢复到可作决定的优先权节点。'),{code:'unsupported_root'});
+  auditObservedAction(source,inspection.actions);
   return {prepared,worlds,inspection};
 }
 async function runForgeBranch({job,replay,ask,progress,forge,deckService,profileDir,focus='',preparedStart}){
@@ -100,9 +103,9 @@ async function runForgeBranch({job,replay,ask,progress,forge,deckService,profile
   if(job.type==='plan')return job.result;
   progress(job,'search','正在比较满足玩法意图的候选分支…');let last=0;
   const result=await search({client:forge,source,worlds,signal:job.abort.signal,budget:{iterations:40,width:7,maxDepth:9},onProgress:p=>{
-    if(Date.now()-last>1200||p.iteration===p.iterations){last=Date.now();progress(job,'search',`意图分支 · 世界 ${p.world}/${p.worlds} · 搜索 ${p.iteration}/${p.iterations}`);}
+    if(Date.now()-last>1200||p.completedIterations===p.totalIterations){last=Date.now();progress(job,'search',`意图分支 · ${p.worlds} 个隐藏世界 · 搜索 ${p.completedIterations}/${p.totalIterations}`);}
   }});
-  const searchSummary={worlds:worlds.length,simulated:result.simulated,winningCandidates:result.winningCandidates.length,elapsedMs:result.elapsedMs,
+  const searchSummary={worlds:worlds.length,simulated:result.simulated,reusedSimulations:result.reusedSimulations||0,winningCandidates:result.winningCandidates.length,elapsedMs:result.elapsedMs,
     alternatives:result.alternatives.slice(0,4).map(candidate=>({label:candidate.action.label||candidate.action.cardName||'让过',mean:candidate.mean,visits:candidate.visits}))};
   await fs.writeFile(path.join(job.dir,'search-candidates.json'),JSON.stringify({sourceLine:job.sourceLine,worlds,result,intent,plan},null,2));
   if(job.type==='search')return{plan,searchSummary,review:replay.review};

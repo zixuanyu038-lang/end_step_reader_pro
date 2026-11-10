@@ -13,6 +13,7 @@ import forge.game.*;
 import forge.game.ability.*;
 import forge.game.ability.effects.CharmEffect;
 import forge.game.card.*;
+import forge.game.combat.Combat;
 import forge.game.mana.Mana;
 import forge.game.phase.PhaseHandler;
 import forge.game.player.*;
@@ -22,6 +23,7 @@ import forge.game.trigger.TriggerType;
 import forge.game.trigger.WrappedAbility;
 import forge.game.zone.ZoneType;
 import forge.util.MyRandom;
+import forge.util.collect.FCollectionView;
 import java.io.*;
 import java.lang.reflect.*;
 import java.nio.charset.StandardCharsets;
@@ -61,6 +63,13 @@ public final class EngineWorker {
         List<Player> seats;
         List<Object> initialLibraries;
         final List<Object> trace=new ArrayList<>(),executed=new ArrayList<>();final List<JsonObject> decisions=new ArrayList<>();
+        JsonObject resolutionChoice,timedCast;
+        boolean enumerateChoices,expandChoices,keepExecuted,skipForcedPasses,exhaustive;
+        final Set<String> enumerationGaps=new LinkedHashSet<>();
+        List<JsonObject> effectMenu;
+        List<Choice> priorityMenu;
+        int effectActor=-1;
+        boolean resolutionChoiceApplied,timedCastApplied;
         JsonArray path;int pathIndex=0,choices=0,step=0,rootTurn=0,viewer=1,maxChoices=400;
         boolean rollout=false,includeTrace=false;Choice pending;int logOffset=0;
         Map<String,Object> lastAction;
@@ -148,16 +157,33 @@ public final class EngineWorker {
             if(context.game.getStack().isEmpty()||context.game.getPhaseHandler().getTurn()!=context.rootTurn)context.initialExchangeOpen=false;
             long decisionSeed=context.root.get("seed").getAsLong()+0x9e3779b97f4a7c15L*context.choices;
             MyRandom.setRandom(new Random(decisionSeed));
+            List<Choice> menu=null;
+            if(context.skipForcedPasses&&(!context.rollout||context.pathIndex<context.path.size())){
+                menu=candidates(context,actor);
+                if(menu.size()==1&&menu.get(0).ability==null)return null;
+            }
             if(context.pathIndex<context.path.size()){
                 JsonObject action=context.path.get(context.pathIndex++).getAsJsonObject();
                 require(num(action,"actorId",-1)==context.game.getPlayers().indexOf(actor),"Path actor does not have priority");
                 if(str(action,"kind","").equals("pass")){context.decisions.add(action);context.completed(action);return null;}
                 String key=str(action,"key","");Choice selected=null;
-                for(Choice c:candidates(context,actor))if(str(c.action,"key","").equals(key)){selected=c;break;}
+                for(Choice c:menu==null?candidates(context,actor):menu)if(str(c.action,"key","").equals(key)){selected=c;break;}
                 require(selected!=null,"Path action is no longer available: "+str(action,"label",key));
                 context.pending=selected;context.decisions.add(selected.action);return List.of(selected.ability);
             }
-            if(!context.rollout)throw new Boundary();
+            if(!context.rollout){context.priorityMenu=menu;throw new Boundary();}
+            if(context.timedCast!=null&&!context.timedCastApplied&&context.seats.indexOf(actor)==context.viewer&&
+                context.game.getPhaseHandler().getTurn()==num(context.timedCast,"turn",-1)){
+                String phase=context.game.getPhaseHandler().getPhase().name();
+                if(!phase.equals(str(context.timedCast,"phase","")))return null;
+                for(Choice option:candidates(context,actor)){
+                    if(str(option.action,"kind","").equals("cast")&&str(option.action,"cardName","").equals("Show and Tell")&&
+                        num(option.action,"cardId",-1)==num(context.timedCast,"sourceId",-2)){
+                        context.pending=option;context.decisions.add(option.action);return List.of(option.ability);
+                    }
+                }
+                return null;
+            }
             if(context.seats.indexOf(actor)==context.viewer&&context.wanted()!=null){
                 if(context.game.getPhaseHandler().getTurn()>context.goalStartedTurn+2){context.blockedGoals.add(str(context.wanted(),"cardName","")+": unavailable after opponent responses / two turns");context.goalIndex++;context.goalStartedTurn=context.game.getPhaseHandler().getTurn();}
                 if(context.wanted()!=null){
@@ -178,6 +204,82 @@ public final class EngineWorker {
             }
             if(selected!=null&&selected.size()>1)return new ArrayList<>(selected.subList(0,1));
             return selected;
+        }
+        @Override public <T extends GameEntity> T chooseSingleEntityForEffect(FCollectionView<T> options,DelayedReveal reveal,
+                SpellAbility ability,String title,boolean optional,Player related,Map<String,Object> params){
+            if(ability!=null&&ability.getHostCard().getName().equals("Atraxa, Grand Unifier")){
+                List<T> selected=searchEffectChoice(options,ability,optional?0:1,1);
+                if(selected!=null)return selected.isEmpty()?null:selected.get(0);
+            }
+            return super.chooseSingleEntityForEffect(options,reveal,ability,title,optional,related,params);
+        }
+        private <T extends GameEntity> List<T> searchEffectChoice(Iterable<T> options,SpellAbility ability,int min,int max){
+            if(!context.enumerateChoices||min<0||max>2||max<min)return null;
+            List<T> cards=new ArrayList<>();
+            for(T option:options)if(option instanceof Card)cards.add(option);else return null;
+            if(cards.size()<min||cards.isEmpty())return null;
+            JsonObject next=context.pathIndex<context.path.size()?context.path.get(context.pathIndex).getAsJsonObject():null;
+            if(!context.expandChoices&&(next==null||!str(next,"kind","").equals("choice")))return null;
+            List<List<T>> picks=new ArrayList<>();
+            if(min==0)picks.add(List.of());
+            if(min<=1&&max>=1)for(T card:cards)picks.add(List.of(card));
+            if(max==2)for(int i=0;i<cards.size();i++)for(int j=i+1;j<cards.size();j++)picks.add(List.of(cards.get(i),cards.get(j)));
+            int seat=context.seats.indexOf(actor),sourceId=context.external(ability.getHostCard());
+            List<JsonObject> menu=new ArrayList<>();
+            for(List<T> selection:picks){
+                List<Integer> ids=selection.stream().map(c->context.external((Card)c)).toList();
+                String key="choice:"+seat+":"+sourceId+":"+ids;
+                if(next!=null&&str(next,"key","").equals(key)){
+                    context.pathIndex++;context.decisions.add(next);
+                    if(context.includeTrace)context.capture("choice",ability.getHostCard().getName()+" → "+selection.stream().map(GameEntity::getName).toList());
+                    return selection;
+                }
+                JsonObject action=new JsonObject();
+                action.addProperty("key",key);action.addProperty("kind","choice");action.addProperty("actorId",seat);
+                action.addProperty("cardId",sourceId);action.addProperty("cardName",ability.getHostCard().getName());
+                action.addProperty("label",ability.getHostCard().getName()+" → "+selection.stream().map(GameEntity::getName).toList());
+                menu.add(action);
+            }
+            if(next!=null)throw new InvalidAction("Recorded effect selection is not available");
+            context.effectMenu=menu;context.effectActor=seat;
+            throw new Boundary();
+        }
+        private <T extends GameEntity> List<T> forcedChoice(Iterable<T> options,SpellAbility ability,String name,int min,int max){
+            JsonObject choice=context.resolutionChoice;
+            if(choice==null||context.resolutionChoiceApplied||context.seats.indexOf(actor)!=context.viewer||
+                !name.equals(str(choice,"name",""))||!name.equals(ability.getHostCard().getName())||
+                context.external(ability.getHostCard())!=num(choice,"sourceId",-1))return null;
+            List<T> selected=new ArrayList<>();
+            Set<Integer> ids=new HashSet<>();
+            for(JsonElement e:choice.getAsJsonArray("ids")){
+                int id=e.getAsInt();require(ids.add(id),"Duplicate resolution choice");
+                T found=null;
+                for(T option:options)if(option instanceof Card card&&context.external(card)==id){found=option;break;}
+                if(found==null)return null;
+                selected.add(found);
+            }
+            if(selected.size()<min||selected.size()>max)return null;
+            context.resolutionChoiceApplied=true;
+            if(context.includeTrace)context.capture("choice","Chose "+selected.stream().map(GameEntity::getName).toList()+" for "+name);
+            return selected;
+        }
+        @Override public <T extends GameEntity> List<T> chooseEntitiesForEffect(FCollectionView<T> options,int min,int max,DelayedReveal reveal,
+                SpellAbility ability,String title,Player related,Map<String,Object> params){
+            List<T> selected=forcedChoice(options,ability,"Stock Up",min,max);
+            if(selected==null&&ability.getHostCard().getName().equals("Stock Up"))
+                selected=searchEffectChoice(options,ability,min,max);
+            return selected!=null?selected:super.chooseEntitiesForEffect(options,min,max,reveal,ability,title,related,params);
+        }
+        @Override public Card chooseSingleCardForZoneChange(ZoneType destination,List<ZoneType> origin,SpellAbility ability,CardCollection options,
+                DelayedReveal reveal,String title,boolean optional,Player related){
+            if(destination==ZoneType.Battlefield&&origin.contains(ZoneType.Hand)&&
+                List.of("Sneak Attack","Show and Tell").contains(ability.getHostCard().getName())){
+                List<Card> selection=searchEffectChoice(options,ability,optional?0:1,1);
+                if(selection!=null)return selection.isEmpty()?null:selection.get(0);
+            }
+            List<Card> selected=destination==ZoneType.Battlefield&&origin.contains(ZoneType.Hand)?
+                forcedChoice(options,ability,"Show and Tell",optional?0:1,1):null;
+            return selected!=null?(selected.isEmpty()?null:selected.get(0)):super.chooseSingleCardForZoneChange(destination,origin,ability,options,reveal,title,optional,related);
         }
         @Override public List<AbilitySub> chooseModeForAbility(SpellAbility sa,List<AbilitySub> options,int min,int max,boolean repeat){
             Choice forced=context.pending;
@@ -200,6 +302,9 @@ public final class EngineWorker {
             context.pending=null;
             require(success,"Forge rejected payment or choices: "+label);
             if(forced!=null)context.completed(forced.action);
+            if(context.timedCast!=null&&context.seats.indexOf(actor)==context.viewer&&sa.isSpell()&&label.equals("Show and Tell")&&
+                context.external(sa.getHostCard())==num(context.timedCast,"sourceId",-1)&&context.game.getPhaseHandler().getTurn()==num(context.timedCast,"turn",-2)&&
+                context.game.getPhaseHandler().getPhase().name().equals(str(context.timedCast,"phase","")))context.timedCastApplied=true;
             context.executed.add(Map.of("turn",context.game.getPhaseHandler().getTurn(),"actorId",context.seats.indexOf(actor),"kind",kind,"cardName",label,"description",actualAbility[0].getStackDescription()));
             if(context.includeTrace){
                 SpellAbility actual=actualAbility[0];Map<String,Object> action=new LinkedHashMap<>();
@@ -218,7 +323,7 @@ public final class EngineWorker {
             return true;
         }
     }
-    static Context restore(JsonObject root)throws Exception {
+    static Context restore(JsonObject root,boolean includeLibraries)throws Exception {
         Context c=new Context();c.root=root;c.viewer=num(root,"viewerId",1);
         MyRandom.setRandom(new Random(root.get("seed").getAsLong()));
         List<RegisteredPlayer> registered=new ArrayList<>();
@@ -246,9 +351,18 @@ public final class EngineWorker {
             if(bool(status,"hasMonarch",false)){c.game.setMonarch(p);p.createMonarchEffect("CN2");}
             if(bool(status,"hasInitiative",false)){c.game.setHasInitiative(p);p.createInitiativeEffect("CLB");}
             if(bool(status,"hasCitysBlessing",false))p.setBlessing(true,"RIX");
+            if(status.has("companion")){
+                JsonObject proof=status.getAsJsonObject("companion");
+                Card companion=p.getCardsIn(ZoneType.Command).stream().filter(card->
+                    c.external(card)==num(proof,"id",-1)&&card.getName().equals(str(proof,"name",""))).findFirst().orElse(null);
+                require(companion!=null&&!companion.getKeywords(forge.game.keyword.Keyword.COMPANION).isEmpty(),"Missing recorded companion");
+                var effect=Player.createCompanionEffect(companion);
+                p.getZone(ZoneType.Command).add(effect);
+            }
             for(JsonElement original:status.getAsJsonArray("commandEffects")){
                 JsonObject effect=original.getAsJsonObject();Card restored=null;
                 for(Card card:p.getCardsIn(ZoneType.Command))if(card.getName().equals(str(effect,"name",""))){restored=card;break;}
+                if(restored==null)restored=restoreAdventure(p,str(effect,"name",""));
                 require(restored!=null,"Unrestored continuous command effect: "+str(effect,"name",""));c.external.put(restored.getId(),num(effect,"id",-1));
             }
         }
@@ -270,6 +384,17 @@ public final class EngineWorker {
             p.dangerouslySetController(new Controller(c.game,p,registered.get(i).getPlayer(),c));
         }
         PhaseHandler ph=c.game.getPhaseHandler();
+        if(root.has("combat")){
+            Combat combat=new Combat(ph.getPlayerTurn());
+            for(JsonElement entry:root.getAsJsonObject("combat").getAsJsonArray("attackers")){
+                JsonObject attack=entry.getAsJsonObject();
+                Card attacker=(Card)c.target("c:"+num(attack,"card",-1));
+                int defender=num(attack,"defender",0);
+                combat.addAttacker(attacker,(GameEntity)c.target(defender<0?"p:"+(-defender-1):"c:"+defender));
+                if(attack.has("blocked")&&!attack.get("blocked").isJsonNull())combat.setBlocked(attacker,attack.get("blocked").getAsBoolean());
+            }
+            ph.setCombat(combat);
+        }
         if(root.has("spellHistory")){
             c.game.getStack().getSpellsCastThisTurn().clear();c.game.getStack().getSpellsCastLastTurn().clear();
             for(JsonElement entry:root.getAsJsonArray("spellHistory")){
@@ -284,9 +409,25 @@ public final class EngineWorker {
         ph.setPriority(c.game.getPlayers().get(num(root,"firstPriorityId",num(root,"activePlayerId",0))));
         field(ph,"pPlayerPriority",c.game.getPlayers().get(num(root,"priorityPlayerId",0)));
         field(ph,"givePriorityToPlayer",true);
-        c.initialLibraries=new ArrayList<>();for(Player p:c.seats){List<Object> library=new ArrayList<>();for(Card card:p.getCardsIn(ZoneType.Library))library.add(Map.of("id",c.external(card),"name",card.getName()));c.initialLibraries.add(library);}
+        c.initialLibraries=new ArrayList<>();if(includeLibraries)for(Player p:c.seats){List<Object> library=new ArrayList<>();for(Card card:p.getCardsIn(ZoneType.Library))library.add(Map.of("id",c.external(card),"name",card.getName()));c.initialLibraries.add(library);}
         c.game.copyLastState();c.logOffset=c.game.getGameLog().getAllEntries().size();
         return c;
+    }
+    static Card restoreAdventure(Player player,String effectName){
+        // Match the public Adventure permission to a unique exiled card's Adventure face.
+        if(!effectName.matches(".+ \\(\\d+\\)'s Adventure")||effectName.matches(".*[|$\\r\\n].*"))return null;
+        String adventureName=effectName.substring(0,effectName.lastIndexOf(" ("));
+        List<Card> matches=player.getCardsIn(ZoneType.Exile).stream().filter(card->card.isAdventureCard()&&
+            card.getOwner()==player&&card.getState(forge.card.CardStateName.Secondary).getName().equals(adventureName)).toList();
+        if(matches.size()!=1)return null;
+        Card card=matches.get(0);
+        // The same permission as GameState's OnAdventure loader, preserving the recorded effect name.
+        SpellAbility ability=AbilityFactory.getAbility("DB$ Effect | RememberObjects$ Self | StaticAbilities$ Play | ForgetOnMoved$ Exile | Duration$ Permanent | Name$ "+effectName,card);
+        ability.setSVar("Play","Mode$ Continuous | MayPlay$ True | EffectZone$ Command | Affected$ Card.IsRemembered+!Adventure | AffectedZone$ Exile | Description$ You may cast the card.");
+        ability.setActivatingPlayer(player);
+        ability.resolve();
+        card.setExiledWith(card);card.setExiledBy(player);
+        return player.getCardsIn(ZoneType.Command).stream().filter(effect->effect.getName().equals(effectName)).findFirst().orElse(null);
     }
     static void restoreAcererakTrigger(Context c,JsonObject entry,JsonObject original,Player player){
         require(str(original,"name","").equals("Acererak the Archlich")
@@ -363,6 +504,10 @@ public final class EngineWorker {
         Map<String,Object> c=new LinkedHashMap<>();
         c.put("id",ctx.external(card));c.put("name",hide?"Hidden card":card.getName());
         c.put("zone",card.getZone()==null?"Command":card.getZone().getZoneType().toString());
+        if(card.getZone()!=null&&card.getZone().getZoneType()==ZoneType.Command&&ctx.root.has("statuses")){
+            JsonObject status=ctx.root.getAsJsonArray("statuses").get(ctx.seats.indexOf(card.getOwner())).getAsJsonObject();
+            if(status.has("companion")&&ctx.external(card)==num(status.getAsJsonObject("companion"),"id",-1))c.put("isCompanion",true);
+        }
         c.put("ownerId",String.valueOf(ctx.seats.indexOf(card.getOwner())));
         c.put("controllerId",String.valueOf(ctx.seats.indexOf(card.getController())));
         c.put("tapped",card.isTapped());c.put("faceDown",hide||card.isFaceDown());c.put("isToken",card.isToken());
@@ -376,6 +521,11 @@ public final class EngineWorker {
         c.put("counters",counters);List<String> keywords=new ArrayList<>();for(var keyword:card.getKeywords())keywords.add(keyword.getOriginal());c.put("keywords",hide?List.of():keywords);c.put("color",hide?"C":card.getColor().toString());
         if(card.isPlaneswalker())c.put("loyalty",card.getCurrentLoyalty());
         c.put("isAttacking",ctx.game.getCombat()!=null&&ctx.game.getCombat().isAttacking(card));c.put("isBlocking",ctx.game.getCombat()!=null&&ctx.game.getCombat().isBlocking(card));c.put("isTransformed",card.isTransformed());c.put("isBackFace",card.isTransformed());
+        if(ctx.game.getCombat()!=null&&ctx.game.getCombat().isAttacking(card)){
+            GameEntity defender=ctx.game.getCombat().getDefenderByAttacker(card);
+            if(defender instanceof Player p)c.put("attackingDefenderId",-1-ctx.seats.indexOf(p));
+            else if(defender instanceof Card target)c.put("attackingDefenderId",ctx.external(target));
+        }
         c.put("isPhasedOut",card.isPhasedOut());c.put("attachedCards",List.of());
         if(!card.getNamedCard().isEmpty())c.put("chosenMarks",List.of(Map.of("kind","NAME","value",card.getNamedCard())));
         return c;
@@ -457,13 +607,36 @@ public final class EngineWorker {
         if(!part.usesTargeting()){
             targetSets.add(new JsonArray());targetProducts(ctx,p,sa,chain,index+1,targetSets,output,description,limit);targetSets.remove(targetSets.size()-1);return;
         }
-        int min=part.getMinTargets();if(min>1)return; // Explicit bounded subset: multi-target combinations will be expanded later.
+        int min=part.getMinTargets();
+        if(ctx.exhaustive){
+            List<GameObject> options=targetOptions(ctx,part,p);
+            targetSelections(ctx,p,sa,chain,index,targetSets,output,description,options,new ArrayList<>(),min,part.getMaxTargets());
+            return;
+        }
+        if(min>1)return; // Fast search uses single-target choices.
         List<GameObject> options=targetOptions(ctx,part,p);
         if(min==0){targetSets.add(new JsonArray());targetProducts(ctx,p,sa,chain,index+1,targetSets,output,description,limit);targetSets.remove(targetSets.size()-1);}
         for(GameObject o:options){
             JsonArray selected=new JsonArray();selected.add(ctx.ref(o));targetSets.add(selected);
             targetProducts(ctx,p,sa,chain,index+1,targetSets,output,description,limit);targetSets.remove(targetSets.size()-1);
             if(output.size()>=limit)break;
+        }
+    }
+    static void targetSelections(Context ctx,Player p,SpellAbility sa,List<SpellAbility> chain,int index,JsonArray targetSets,
+            List<Choice> output,JsonObject description,List<GameObject> options,List<GameObject> selected,int min,int max){
+        if(selected.size()>=min){
+            JsonArray refs=new JsonArray();
+            for(GameObject option:selected)refs.add(ctx.ref(option));
+            targetSets.add(refs);
+            try{targetProducts(ctx,p,sa,chain,index+1,targetSets,output,description,Integer.MAX_VALUE);}
+            catch(InvalidAction error){ctx.enumerationGaps.add(error.getMessage());}
+            finally{targetSets.remove(targetSets.size()-1);}
+        }
+        if(selected.size()>=max)return;
+        for(GameObject option:options)if(!selected.contains(option)){
+            selected.add(option);
+            targetSelections(ctx,p,sa,chain,index,targetSets,output,description,options,selected,min,max);
+            selected.remove(selected.size()-1);
         }
     }
     static List<Choice> candidates(Context ctx,Player p){
@@ -480,8 +653,10 @@ public final class EngineWorker {
                     modeSets.clear();List<AbilitySub> options=CharmEffect.makePossibleOptions(original);
                     int min=AbilityUtils.calculateAmount(original.getHostCard(),original.getParamOrDefault("MinCharmNum",original.getParamOrDefault("CharmNum","1")),original);
                     int max=AbilityUtils.calculateAmount(original.getHostCard(),original.getParamOrDefault("CharmNum","1"),original);
+                    if(ctx.exhaustive&&(max>2||original.hasParam("CanRepeatModes")))ctx.enumerationGaps.add("Unexpanded modal combinations: "+original.getHostCard().getName());
                     for(int i=0;i<options.size();i++){if(min<=1&&max>=1)modeSets.add(new ArrayList<>(List.of(i)));if(min<=2&&max>=2)for(int j=i+1;j<options.size();j++)modeSets.add(new ArrayList<>(List.of(i,j)));}
                 }
+                if(ctx.exhaustive&&original.costHasManaX())ctx.enumerationGaps.add("Unexpanded X values: "+original.getHostCard().getName());
                 for(List<Integer> modes:modeSets)for(int x:original.costHasManaX()?new int[]{0,1,2,3,5}:new int[]{-1}){
                     SpellAbility sa=original.copy(p);if(x>=0)sa.setXManaCostPaid(x);
                     if(!modes.isEmpty()){
@@ -493,11 +668,13 @@ public final class EngineWorker {
                     action.addProperty("cardName",sa.getHostCard().getName());action.addProperty("label",sa.getHostCard().getName()+" — "+sa.toString());
                     action.addProperty("manaCost",sa.getHostCard().getManaCost().toString());action.addProperty("x",x);action.add("modes",JSON.toJsonTree(modes));
                     action.add("modeDescriptions",JSON.toJsonTree(sa.getChosenList()==null?List.of():sa.getChosenList().stream().map(SpellAbility::getDescription).toList()));
-                    targetProducts(ctx,p,sa,parts(sa),0,new JsonArray(),result,action,Math.min(80,result.size()+8));
-                    if(result.size()>=80)break;
+                    targetProducts(ctx,p,sa,parts(sa),0,new JsonArray(),result,action,ctx.exhaustive?Integer.MAX_VALUE:Math.min(80,result.size()+8));
+                    if(!ctx.exhaustive&&result.size()>=80)break;
                 }
-            }catch(Exception ignored){/* Unsupported candidates are excluded, never executed through a state patch. */}
-            if(result.size()>=80)break;
+            }catch(Exception error){
+                if(ctx.exhaustive)ctx.enumerationGaps.add("Candidate adapter: "+original.getHostCard().getName()+" / "+error);
+            }
+            if(!ctx.exhaustive&&result.size()>=80)break;
         }
         JsonObject pass=new JsonObject();pass.addProperty("kind","pass");pass.addProperty("actorId",actor);pass.addProperty("key","pass:"+actor);pass.addProperty("label","Pass priority");
         result.add(new Choice(null,pass));result.removeIf(choice->!ctx.allowed(choice));return result;
@@ -529,14 +706,27 @@ public final class EngineWorker {
         }
         result.add("cards",cards);return result;
     }
+    static int winnerSeat(Context c){
+        if(!c.game.isGameOver()||c.game.getOutcome()==null)return -1;
+        RegisteredPlayer winner=c.game.getOutcome().getWinningPlayer();
+        return winner==null?-1:c.game.getMatch().getPlayers().indexOf(winner);
+    }
     static JsonObject execute(JsonObject request)throws Exception {
         if(str(request,"command","").equals("catalog"))return catalog(request);
-        Context c=restore(request.getAsJsonObject("root"));
-        c.path=request.has("path")?request.getAsJsonArray("path"):new JsonArray();c.includeTrace=bool(request,"includeTrace",false);
-        c.maxChoices=Math.min(8000,Math.max(1,num(request,"maxChoices",400)));
-        int maxSteps=Math.min(12000,Math.max(1,num(request,"maxSteps",800)));
-        int horizon=Math.min(100,Math.max(0,num(request,"horizonTurns",2)));
         boolean simulate=str(request,"command","expand").equals("simulate");
+        boolean searchProbe=bool(request,"searchProbe",false)&&!bool(request,"includeTrace",false);
+        Context c=restore(request.getAsJsonObject("root"),!searchProbe);
+        c.exhaustive=bool(request,"exhaustive",false);
+        c.enumerateChoices=bool(request,"enumerateChoices",false);
+        c.expandChoices=c.enumerateChoices&&!simulate;
+        c.keepExecuted=bool(request,"includeExecuted",false);
+        c.skipForcedPasses=!simulate&&bool(request,"skipForcedPasses",false)||bool(request,"skipForcedPasses",false)&&request.has("path");
+        c.timedCast=request.has("timedCast")?request.getAsJsonObject("timedCast"):null;
+        c.resolutionChoice=request.has("resolutionChoice")?request.getAsJsonObject("resolutionChoice"):null;
+        c.path=request.has("path")?request.getAsJsonArray("path"):new JsonArray();c.includeTrace=bool(request,"includeTrace",false);
+        c.maxChoices=c.exhaustive?Integer.MAX_VALUE:Math.min(8000,Math.max(1,num(request,"maxChoices",400)));
+        int maxSteps=c.exhaustive?Integer.MAX_VALUE:Math.min(12000,Math.max(1,num(request,"maxSteps",800)));
+        int horizon=Math.min(100,Math.max(0,num(request,"horizonTurns",2)));
         c.rollout=false;c.capture("root","Restored and audited search root");String stopped="decision";
         int steps=0;
         while(!c.game.isGameOver()&&steps++<maxSteps){
@@ -544,7 +734,7 @@ public final class EngineWorker {
             catch(Boundary boundary){
                 if(c.pathIndex<c.path.size())throw new InvalidAction("Path exceeded decision budget");
                 if(!simulate||c.choices>c.maxChoices){stopped=c.choices>c.maxChoices?"choice_budget":"decision";break;}
-                c.rollout=true;
+                c.rollout=true;c.priorityMenu=null;
             }
             if(c.pathIndex>=c.path.size()&&c.rollout&&c.game.getPhaseHandler().getTurn()>=c.rootTurn+horizon){stopped="horizon";break;}
             if(c.includeTrace&&c.trace.size()>4000){stopped="trace_budget";break;}
@@ -552,12 +742,33 @@ public final class EngineWorker {
         require(c.pathIndex==c.path.size(),"Path did not complete before cutoff");
         if(c.game.isGameOver())stopped="game_over";else if(steps>=maxSteps)stopped="step_budget";
         c.capture("end",stopped);
-        JsonObject output=new JsonObject();output.add("state",JSON.toJsonTree(snapshot(c)));output.add("evaluation",JSON.toJsonTree(evaluation(c)));
-        output.add("rootLibraries",JSON.toJsonTree(c.initialLibraries));
+        JsonObject output=new JsonObject();
+        int winner=winnerSeat(c);
+        if(searchProbe&&simulate){
+            JsonObject state=new JsonObject();
+            state.addProperty("status",c.game.isGameOver()?"COMPLETE":"ACTIVE");
+            state.addProperty("turnNumber",c.game.getPhaseHandler().getTurn());
+            if(winner>=0)state.addProperty("winnerId",String.valueOf(winner));
+            output.add("state",state);
+        }else{
+            Map<String,Object> state=snapshot(c);
+            if(c.effectActor>=0)state.put("priorityPlayerId",String.valueOf(c.effectActor));
+            output.add("state",JSON.toJsonTree(state));
+        }
+        if(simulate||!searchProbe)output.add("evaluation",JSON.toJsonTree(evaluation(c)));
+        if(!searchProbe)output.add("rootLibraries",JSON.toJsonTree(c.initialLibraries));
+        if(c.timedCast!=null)output.addProperty("timedCastApplied",c.timedCastApplied);
+        if(c.resolutionChoice!=null)output.addProperty("resolutionChoiceApplied",c.resolutionChoiceApplied);
         output.addProperty("stopReason",stopped);output.addProperty("choices",c.choices);output.addProperty("engineSteps",steps);
-        output.add("decisions",JSON.toJsonTree(c.decisions));output.add("trace",JSON.toJsonTree(c.trace));output.add("executed",JSON.toJsonTree(c.executed));
+        if(!searchProbe){
+            output.add("decisions",JSON.toJsonTree(c.decisions));output.add("trace",JSON.toJsonTree(c.trace));
+        }
+        if(!searchProbe||c.keepExecuted||simulate&&winner==c.viewer)output.add("executed",JSON.toJsonTree(c.executed));
         output.add("intentStatus",JSON.toJsonTree(Map.of("completed",c.goalsCompleted,"total",c.goals().size(),"blocked",c.blockedGoals)));
-        List<JsonObject> actions=new ArrayList<>();if(stopped.equals("decision"))for(Choice choice:candidates(c,c.game.getPhaseHandler().getPriorityPlayer()))actions.add(choice.action);
+        List<JsonObject> actions=new ArrayList<>();
+        if(c.effectMenu!=null)actions.addAll(c.effectMenu);
+        else if(stopped.equals("decision"))for(Choice choice:c.priorityMenu==null?candidates(c,c.game.getPhaseHandler().getPriorityPlayer()):c.priorityMenu)actions.add(choice.action);
+        if(c.exhaustive)output.add("enumerationGaps",JSON.toJsonTree(c.enumerationGaps));
         output.add("actions",JSON.toJsonTree(actions));return output;
     }
     static String applyRaptorRules()throws Exception {

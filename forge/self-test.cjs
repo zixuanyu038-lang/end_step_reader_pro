@@ -6,6 +6,12 @@ async function checkForgeRuntime(client){
   const bolt=expanded.actions.find(a=>a.cardName==='Lightning Bolt'&&(a.targets||[]).flat().includes('p:0'));assert.ok(bolt,'Bolt must have a real legal opponent target');
   const result=await client.request({command:'simulate',root,path:[bolt],includeTrace:true,horizonTurns:2});
   assert.equal(result.stopReason,'game_over');assert.equal(result.state.winnerId,'1');assert.equal(result.state.players[0].life,0);assert.equal(result.trace.find(f=>f.action)?.action.manaPaid[0].color,'R');
+  const probe=await client.request({command:'simulate',root,path:[bolt],searchProbe:true,horizonTurns:2});
+  assert.equal(probe.stopReason,result.stopReason);
+  assert.deepEqual(probe.state,{status:result.state.status,turnNumber:result.state.turnNumber,winnerId:result.state.winnerId});
+  assert.deepEqual(probe.evaluation,result.evaluation);
+  assert.deepEqual(probe.executed,result.executed);
+  assert.equal(probe.rootLibraries,undefined);
   const acerName='Acererak the Archlich';
   const triggered={...root,stateText:root.stateText.replace('p1hand=Lightning Bolt|Id:11','p0battlefield='+acerName+'|Id:9\np1hand=Swords to Plowshares|Id:11;Consign to Memory|Id:12').replace('p1battlefield=Mountain|Id:10','p1battlefield=Tundra|Id:10;Tundra|Id:13'),stack:[{
     sourceCard:{id:9,name:acerName,controllerId:'0'},sourceCardZone:'Battlefield',isAbility:true,isTrigger:true,abilityDescription:'When Acererak the Archlich enters, if you haven\'t completed Tomb of Annihilation, return it and venture into the dungeon.',targets:[]
@@ -70,9 +76,35 @@ async function checkRaptorTrigger(client){
     'Raptor entering without a cast does not exile from the library');
 }
 
+async function checkEffectChoices(client){
+  const first=['Lotus Petal','Atraxa, Grand Unifier','Plains','Island','Mountain'];
+  const later=['Lotus Petal',...Array(18).fill('Island')];
+  const library=first.concat(later).map((name,i)=>name+'|Id:'+(20+i)).join(';');
+  const root={seed:51,viewerId:1,names:['Opponent','Player'],gameId:'stock-up-choice-menu',
+    activePlayerId:1,priorityPlayerId:1,firstPriorityId:1,history:[{},{}],
+    stateText:['turn=8','activeplayer=p1','activephase=MAIN1','p0life=30','p1life=12',
+      'p1hand=Stock Up|Id:11;Emrakul, the Aeons Torn|Id:12',
+      'p1battlefield=Sneak Attack|Id:13;Island|Id:14;Island|Id:15;Island|Id:16',
+      'p0library=Plains|Id:80;Plains|Id:81','p1library='+library].join('\n')+'\n'};
+  const start=await client.request({command:'expand',root});
+  const cast=start.actions.find(a=>a.cardName==='Stock Up');
+  const path=[cast];let decision;
+  for(let i=0;i<4;i++){
+    decision=await client.request({command:'expand',root,path,enumerateChoices:true});
+    if(decision.actions[0]?.kind==='choice')break;
+    const pass=decision.actions.find(a=>a.kind==='pass');assert.ok(pass);path.push(pass);
+  }
+  assert.equal(decision.actions.length,10,'Stock Up must expose every legal pair');
+  const pick=decision.actions.find(a=>a.label.includes('Lotus Petal')&&a.label.includes('Atraxa, Grand Unifier'));
+  assert.ok(pick);
+  const resumed=await client.request({command:'expand',root,path:path.concat(pick),enumerateChoices:true});
+  const hand=resumed.state.players[1].hand.map(c=>c.name);
+  assert.ok(hand.includes('Lotus Petal')&&hand.includes('Atraxa, Grand Unifier'),'the chosen effect branch must replay');
+}
+
 if(require.main===module){
  const client=new ForgeClient();
- checkForgeRuntime(client).then(()=>checkRaptorTrigger(client))
+ checkForgeRuntime(client).then(()=>checkRaptorTrigger(client)).then(()=>checkEffectChoices(client))
   .then(()=>console.log(client.engine+' 自检通过。'))
   .catch(error=>{console.error(error.message);process.exitCode=1;})
   .finally(()=>client.close());

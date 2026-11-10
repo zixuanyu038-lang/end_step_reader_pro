@@ -1,5 +1,5 @@
 'use strict';
-const {compact,deduplicate,inspectSearchWorlds,originalSelection,rankActions}=require('./tree-search');
+const {compact,deduplicate,inspectSearchWorlds,mapSearchWorlds,originalSelection,rankActions}=require('./tree-search');
 
 const settings={includeTrace:false,horizonTurns:100,maxChoices:2000,maxSteps:4000};
 const actionLabel=action=>action.label||action.cardName||action.key;
@@ -30,18 +30,18 @@ async function verifyPair({source,candidate,discoveryWorld,worlds,forge,signal})
   const results={status:'illustration',rules:forge.rules||null,original:null,alternative:opening&&actionLabel(opening),attempted:0,
     native:pairedCounts([]),challenge:pairedCounts([]),appliedChallenge:pairedCounts([]),replies:[],discovery:[],samples:[],calls:0};
   if(!opening||String(opening.actorId)!==viewer)return results;
-  async function request(world,command,path){
+  async function request(world,command,path,worker=forge){
     signal?.throwIfAborted();
     results.calls++;
-    return forge.request({command,root:world.root,path:path.map(compact),...settings},{signal});
+    return worker.request({command,root:world.root,path:path.map(compact),...settings,searchProbe:command==='simulate'},{signal});
   }
-  const run=(world,path)=>request(world,'simulate',path).then(result=>terminal(result,viewer));
+  const run=(world,path,worker)=>request(world,'simulate',path,worker).then(result=>terminal(result,viewer));
   const opponent=String(1-Number(viewer));
-  const reachPriority=async(world,path,actor)=>{
-    let fork=await request(world,'expand',path);
+  const reachPriority=async(world,path,actor,worker)=>{
+    let fork=await request(world,'expand',path,worker);
     if(fork.stopReason==='decision'&&String(fork.state.priorityPlayerId)!==actor){
       const pass=fork.actions.find(a=>a.kind==='pass');
-      if(pass){path=path.concat(pass);fork=await request(world,'expand',path);}
+      if(pass){path=path.concat(pass);fork=await request(world,'expand',path,worker);}
     }
     if(fork.stopReason!=='decision'||String(fork.state.priorityPlayerId)!==actor)return null;
     return {path,fork};
@@ -99,41 +99,44 @@ async function verifyPair({source,candidate,discoveryWorld,worlds,forge,signal})
     return results;
   }
 
-  async function challenge(world,action,policy,native){
+  async function challenge(world,action,policy,native,worker){
     if(!policy)return {outcome:native,applied:false};
-    const node=await reachPriority(world,[action],opponent);
+    const node=await reachPriority(world,[action],opponent,worker);
     if(!node||node.fork.state.turnNumber!==policy.turn||node.fork.state.phase!==policy.phase)return {outcome:native,applied:false};
     const matches=node.fork.actions.filter(reply=>signature(reply)===policy.signature);
     if(matches.length!==1)return {outcome:native,applied:false};
-    return {outcome:await run(world,node.path.concat(matches[0])),applied:true};
+    return {outcome:await run(world,node.path.concat(matches[0]),worker),applied:true};
   }
   const seen=new Set([discoveryWorld.root.stateText]);
-  for(const raw of worlds){
-    signal?.throwIfAborted();
-    const world=cleanWorld(raw),key=world.root.stateText;
-    if(seen.has(key))continue;
-    seen.add(key);
-    results.attempted++;
+  const holdouts=worlds.map(cleanWorld).filter(world=>{
+    const key=world.root.stateText;
+    if(seen.has(key))return false;
+    seen.add(key);return true;
+  });
+  results.attempted=holdouts.length;
+  const samples=await mapSearchWorlds(forge,holdouts,async (world,index,worker)=>{
     try{
       results.calls++;
-      const [{initial}]=await inspectSearchWorlds({client:forge,source,worlds:[world],signal});
+      const [{initial}]=await inspectSearchWorlds({client:worker,source,worlds:[world],signal});
       const original=originalSelection(source,initial.actions),alternative=initial.actions.find(a=>a.key===opening.key);
-      if(!original.matched||!alternative||original.key===alternative.key)continue;
-      const actions=[original.action,alternative];
-      const native=[];
-      for(const action of actions)native.push(await run(world,[action]));
-      if(!native.every(Boolean))continue;
-      const challenges=[];
+      if(!original.matched||!alternative||original.key===alternative.key)return {};
+      const actions=[original.action,alternative],native=[],challenges=[];
+      for(const action of actions)native.push(await run(world,[action],worker));
+      if(!native.every(Boolean))return {};
+      let lastError;
       for(const [i,action] of actions.entries()){
-        try{challenges.push(await challenge(world,action,policies[i],native[i]));}
-        catch(error){signal?.throwIfAborted();results.lastError=error.message;challenges.push({outcome:null,applied:false});}
+        try{challenges.push(await challenge(world,action,policies[i],native[i],worker));}
+        catch(error){signal?.throwIfAborted();lastError=error.message;challenges.push({outcome:null,applied:false});}
       }
-      const sample={id:world.id,native,challenge:challenges.map(item=>item.outcome),applied:challenges.map(item=>item.applied)};
-      results.samples.push(sample);
+      return {lastError,sample:{id:world.id,native,challenge:challenges.map(item=>item.outcome),applied:challenges.map(item=>item.applied)}};
     }catch(error){
       signal?.throwIfAborted();
-      results.lastError=error.message;
+      return {lastError:error.message};
     }
+  },signal);
+  for(const {lastError,sample} of samples){
+    if(lastError)results.lastError=lastError;
+    if(sample)results.samples.push(sample);
   }
   results.native=pairedCounts(results.samples.map(s=>s.native));
   results.challenge=pairedCounts(results.samples.map(s=>s.challenge));

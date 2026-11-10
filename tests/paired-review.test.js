@@ -51,3 +51,12 @@ test('a real counterexample or zero applied replies keeps the win as an illustra
   assert.equal(unchallenged.native.better,8);
   assert.equal(unchallenged.status,'illustration');
 });
+
+test('parallel paired verification keeps the serial sample order and the same verdict',async()=>{
+ const {args}=fixture({refuted:true}),serial=await verifyPair(args);
+ const parallel={...args.forge,mapWorlds:async (worlds,visit)=>Promise.all(worlds.map(async (world,index)=>{
+  await new Promise(resolve=>setTimeout(resolve,worlds.length-index));
+  return visit(world,index,args.forge);
+ }))};
+ assert.deepEqual(await verifyPair({...args,forge:parallel}),serial);
+});

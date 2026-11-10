@@ -1,8 +1,8 @@
 {
   "name": "endstep-studio",
-  "version": "0.4.8",
+  "version": "0.4.13",
   "private": true,
-  "description": "Codex-powered MTG match review and hypothetical replay branches",
+  "description": "Forge-backed MTG match review and controlled replay comparisons",
   "scripts": {
     "start": "node studio-server.js",
     "test": "node --test tests/*.test.js",

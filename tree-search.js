@@ -1,12 +1,12 @@
 'use strict';
 const crypto=require('node:crypto');
-const {auditRoot}=require('./hidden-worlds');
+const {auditRoot,auditObservedAction}=require('./hidden-worlds');
 const {baseEngine}=require('./forge-runtime');
 const digest=x=>crypto.createHash('sha256').update(JSON.stringify(x)).digest('hex');
 const compact=a=>({key:a.key,kind:a.kind,actorId:a.actorId,label:a.label});
 function deduplicate(actions){
   const seen=new Set();return actions.filter(a=>{
-    const key=a.kind==='pass'?a.key:JSON.stringify([a.actorId,a.kind,a.cardName,a.abilityIndex,a.modes,a.targets,a.x,a.manaCost]);
+    const key=['pass','choice'].includes(a.kind)?a.key:JSON.stringify([a.actorId,a.kind,a.cardName,a.abilityIndex,a.modes,a.targets,a.x,a.manaCost]);
     if(seen.has(key))return false;seen.add(key);return true;
   });
 }
@@ -28,6 +28,14 @@ function rankActions(actions,state,{observedCardId=null,width=8}={}){
   if(pass&&!kept.includes(pass)){kept.pop();kept.push(pass);}return kept;
 }
 function originalSelection(source,actions){
+  if(source.inferredAction){
+    const {kind,cardId,targets}=source.inferredAction;
+    const refs=targets?.map(t=>t.zone==='Player'?'p:'+t.ownerId:(t.zone==='Stack'?'s:':'c:')+t.id).sort();
+    const matches=actions.filter(a=>a.kind===kind&&String(a.cardId)===String(cardId)&&
+      (refs?JSON.stringify((a.targets||[]).flat().slice().sort())===JSON.stringify(refs):kind==='play_land'));
+    if(matches.length===1)return{matched:true,key:matches[0].key,action:matches[0]};
+    return {matched:false,cardId,reason:'引擎事件不足以唯一核对原操作的模式、目标或费用。'};
+  }
   const row=source.rows.find(x=>x.line===source.anchor.line)?.row;
   const id=row?.action?.cardId;if(id==null)return{matched:false,reason:'这个节点没有精确的原施法操作。'};
   const targets=[];let modeCount=null;
@@ -40,7 +48,7 @@ function originalSelection(source,actions){
       else if(target<0){const onStack=source.baseline.stack.find(s=>s.stackTargetId===target);if(onStack)targets.push('s:'+onStack.sourceCard.id);}
       else targets.push('c:'+target);
     }
-    if(r.k==='event'&&r.event.type==='SPELL_RESOLVED'&&String(r.event.cardId)===String(id))break;
+    if(r.k==='event'&&['SPELL_CAST','ABILITY_ACTIVATED','LAND_PLAYED','SPELL_RESOLVED'].includes(r.event.type)&&String(r.event.cardId)===String(id))break;
   }
   let matches=actions.filter(a=>String(a.cardId)===String(id));
   if(modeCount!=null)matches=matches.filter(a=>a.modes?.length===modeCount);
@@ -51,38 +59,50 @@ function originalSelection(source,actions){
 class Node {
   constructor({path=[],action=null,parent=null,state=null,actions=[]}={}){Object.assign(this,{path,action,parent,state,actions});this.children=[];this.visits=0;this.total=0;this.reward=0;this.rejected=[];}
 }
+async function mapSearchWorlds(client,worlds,visit,signal){
+  if(client.mapWorlds)return client.mapWorlds(worlds,visit,signal);
+  const results=[];
+  for(const [i,world] of worlds.entries()){
+    signal?.throwIfAborted();
+    results.push(await visit(world,i,client));
+  }
+  return results;
+}
 async function inspectSearchWorlds({client,source,worlds,signal}){
-  const checked=[];
-  for(const world of worlds){
-    const initial=await client.request({command:'expand',root:world.root,path:[],includeTrace:false,maxChoices:2000,maxSteps:4000},{signal});
+  return mapSearchWorlds(client,worlds,async (world,index,worker)=>{
+    const initial=await worker.request({command:'expand',root:world.root,path:[],includeTrace:false,maxChoices:2000,maxSteps:4000},{signal});
     if(initial.stopReason!=='decision'||!initial.actions.length)throw Error('Forge 未恢复到有可选动作的优先权节点。');
     const audit=auditRoot(source,initial.state);
+    auditObservedAction(source,initial.actions);
     for(const [i,p] of source.baseline.players.entries()){
       const top=source.knownTop?.[String(p.id)]||[];
       if(top.some((id,n)=>String(initial.rootLibraries[i][n]?.id)!==String(id)))throw Error('Forge 牌库顶顺序与已知信息不一致。');
     }
-    checked.push({initial,audit});
-  }
-  return checked;
+    return {initial,audit};
+  },signal);
 }
 async function search({client,source,worlds,signal,budget={},checkedWorlds,onProgress=()=>{}}){
   const startedAt=Date.now();
   const settings={iterations:32,maxDepth:7,width:7,horizonTurns:100,maxChoices:2000,maxSteps:4000,...budget};
   settings.iterations=Math.max(8,Math.min(120,settings.iterations));settings.width=Math.max(2,Math.min(12,settings.width));settings.maxDepth=Math.max(1,Math.min(16,settings.maxDepth));
-  const rootActor=Number(source.baseline.priorityPlayerId),viewer=Number(source.header.seat),runs=[],totals=new Map(),rootAudits=[];
-  let simulated=0,expanded=0;const winningCandidates=[],winningKeys=new Set();
+  const rootActor=Number(source.baseline.priorityPlayerId),viewer=Number(source.header.seat),totals=new Map();
+  let simulated=0,expanded=0,reusedProbes=0,reusedSimulations=0;
+  const iterationCounts=Array(worlds.length).fill(0);
   checkedWorlds??=await inspectSearchWorlds({client,source,worlds,signal});
-  for(const [worldIndex,world] of worlds.entries()){
+  const completed=await mapSearchWorlds(client,worlds,async (world,worldIndex,worker)=>{
     const worldStartedAt=Date.now();
     if(signal?.aborted)throw Error('任务已取消。');
-    const cache=new Map();
+    const cache=new Map(),winningCandidates=[],winningKeys=new Set();
     const request=async(command,path,includeTrace=false)=>{
       const key=digest({command,path,includeTrace});if(cache.has(key))return cache.get(key);
-      const result=await client.request({command,root:world.root,path:path.map(compact),includeTrace,horizonTurns:settings.horizonTurns,maxChoices:settings.maxChoices,maxSteps:settings.maxSteps},{signal});
-      if(command==='simulate'&&!includeTrace)simulated++;
+      const input={command,root:world.root,path:path.map(compact),includeTrace,searchProbe:true,horizonTurns:settings.horizonTurns,maxChoices:settings.maxChoices,maxSteps:settings.maxSteps};
+      const {result,reused}=client.searchProbe&&!includeTrace?
+        await client.searchProbe(input,{signal},worker):{result:await worker.request(input,{signal})};
+      if(reused)reusedProbes++;
+      if(command==='simulate'&&!includeTrace){simulated++;if(reused)reusedSimulations++;}
       cache.set(key,result);return result;
     };
-    const {initial,audit}=checkedWorlds[worldIndex];rootAudits.push(audit);
+    const {initial}=checkedWorlds[worldIndex];
     const original=originalSelection(source,initial.actions);
     const root=new Node({state:initial.state,actions:rankActions(initial.actions,initial.state,{observedCardId:original.action?.cardId,width:settings.width})});
     if(original.matched&&!root.actions.some(a=>a.key===original.key)){root.actions.pop();root.actions.push(original.action);}
@@ -118,14 +138,21 @@ async function search({client,source,worlds,signal,budget={},checkedWorlds,onPro
         if(node.parent){node.parent.rejected.push(node.action.key);node.parent.children=node.parent.children.filter(n=>n!==node);}
         perWorld.push({path:node.path.map(compact),error:error.message});
       }
-      onProgress({world:worldIndex+1,worlds:worlds.length,iteration:iteration+1,iterations:settings.iterations,simulated,expanded});
-    }
-    for(const child of root.children){if(!child.visits)continue;
-      const key=child.action.key;let aggregate=totals.get(key);if(!aggregate){aggregate={action:child.action,worlds:[],visits:0};totals.set(key,aggregate);}
-      aggregate.worlds.push({worldId:world.id,worldIndex,seed:world.root.seed,mean:child.total/child.visits,visits:child.visits});aggregate.visits+=child.visits;
+      iterationCounts[worldIndex]=iteration+1;
+      onProgress({world:worldIndex+1,worlds:worlds.length,iteration:iteration+1,iterations:settings.iterations,
+        completedIterations:iterationCounts.reduce((sum,count)=>sum+count,0),totalIterations:settings.iterations*worlds.length,simulated,expanded,reusedSimulations});
     }
     const serialize=n=>({action:n.action?compact(n.action):null,actorId:Number(n.state.priorityPlayerId),visits:n.visits,mean:n.visits?n.total/n.visits:null,rejected:n.rejected,children:n.children.map(serialize)});
-    runs.push({worldId:world.id,seed:world.root.seed,elapsedMs:Date.now()-worldStartedAt,original,tree:serialize(root),simulations:perWorld});
+    const run={worldId:world.id,seed:world.root.seed,elapsedMs:Date.now()-worldStartedAt,original,tree:serialize(root),simulations:perWorld};
+    return {run,winningCandidates,actions:root.children.map(child=>child.action)};
+  },signal);
+  const runs=completed.map(x=>x.run),winningCandidates=completed.flatMap(x=>x.winningCandidates);
+  const rootAudits=checkedWorlds.map(x=>x.audit);
+  for(const [worldIndex,{run,actions}] of completed.entries()){
+    for(const [index,child] of run.tree.children.entries()){if(!child.visits)continue;
+      const key=child.action.key;let aggregate=totals.get(key);if(!aggregate){aggregate={action:actions[index],worlds:[],visits:0};totals.set(key,aggregate);}
+      aggregate.worlds.push({worldId:run.worldId,worldIndex,seed:run.seed,mean:child.mean,visits:child.visits});aggregate.visits+=child.visits;
+    }
   }
   const alternatives=[...totals.values()].map(a=>{
     const mean=a.worlds.reduce((n,w)=>n+w.mean,0)/a.worlds.length;
@@ -143,8 +170,8 @@ async function search({client,source,worlds,signal,budget={},checkedWorlds,onPro
   }
   const representative=await client.request({command:'simulate',root:representativeWorld.root,path:chosenPath.map(compact),includeTrace:false,horizonTurns:2,maxChoices:settings.maxChoices,maxSteps:settings.maxSteps},{signal});
   const comparison=original?{matched:true,meanDifference:best.mean-original.mean,perWorldDifferences:best.worlds.map(w=>({worldIndex:w.worldIndex,difference:w.mean-original.worlds.find(o=>o.worldIndex===w.worldIndex).mean}))}:{matched:false,reason:runs[0]?.original?.reason||'原操作没有完成同预算比较。'};
-  return{format:'forge-search-evidence',version:1,engine:client.engine||baseEngine,engineCacheKey:client.cacheKey||null,algorithm:'bounded adversarial UCT over replayed engine paths; independent fixed hidden worlds',elapsedMs:Date.now()-startedAt,settings,simulated,expanded,rootAudits,alternatives,best,original,comparison,runs,
+  return{format:'forge-search-evidence',version:1,engine:client.engine||baseEngine,engineCacheKey:client.cacheKey||null,algorithm:'bounded adversarial UCT over replayed engine paths; independent fixed hidden worlds',elapsedMs:Date.now()-startedAt,settings,simulated,expanded,reusedProbes,reusedSimulations,rootAudits,alternatives,best,original,comparison,runs,
     winningCandidates,representative:{worldId:representativeWorld.id,scenario:representativeWorld.scenario,path:chosenPath.map(compact),...representative},
     limitations:['启发式材料评分不是胜率','情景集可能包含明确构造的交互压力测试，均值不代表真实概率','有限候选、深度、世界及预算，不能证明最优','法术力支付、战斗与部分选择由 Forge 内置策略决定','各隐藏世界分别搜索，尚未实现完整信息集搜索；深层策略可能存在 determinization bias','代表轨迹只是一个已固定假设世界中的真实引擎后续']};
 }
-module.exports={search,inspectSearchWorlds,rankActions,deduplicate,originalSelection,compact};
+module.exports={search,inspectSearchWorlds,mapSearchWorlds,rankActions,deduplicate,originalSelection,compact};

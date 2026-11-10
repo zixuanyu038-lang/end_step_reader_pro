@@ -3,12 +3,13 @@ const http=require('node:http'),fs=require('node:fs/promises'),path=require('nod
 const R=require('./replay'),P=require('./studio-protocol'),Scenario=require('./scenario');
 const {CodexClient}=require('./codex-client');
 const {createModelQueue}=require('./model-queue');
-const {ForgeClient}=require('./forge-client'),{DeckService,DeckLookupError,readDeckPreferences}=require('./deck-service');
+const {ForgePool}=require('./forge-client'),{DeckService,DeckLookupError,readDeckPreferences}=require('./deck-service');
 const {checkForgeRelease}=require('./forge-release');
 const {forgeCacheDir}=require('./forge-runtime');
 const {REVIEW_VERSION,runForgeReview,prepareOnly,shortlistOnly,publicDeckProfile}=require('./search-review'),{runForgeBranch,runBranchQuality,inspectBranchStart}=require('./search-branch'),SearchProtocol=require('./search-protocol');
-const {readManualSideboard}=require('./match-decks');
+const {readManualSideboard,descriptionDeckPreferences,prepareMatchDecks}=require('./match-decks');
 const Source=require('./search-source');
+const {runForgeFindings}=require('./forge-findings');
 const {version}=require('./package.json');
 function readReviewOptions(value){
   const {aiShortlist=true,searchMode='standard'}=value??{};
@@ -20,10 +21,24 @@ function readStressCards(value){
   if(!Array.isArray(value)||value.length>150||value.some(name=>typeof name!=='string'||name.trim().length>180||/[\r\n]/.test(name)))throw Error('请逐行填写对手未知手牌中的英文牌名。');
   return value.map(name=>name.trim()).filter(Boolean);
 }
+function readComparisonPlan(value){
+  if(value==null)return null;
+  if(!Array.isArray(value)||!value.length||value.length>12)throw Error('请选择包含 1 到 12 项的对照计划。');
+  const key=value=>typeof value==='string'&&value.length>0&&value.length<=1000;
+  return value.map(plan=>{
+    const {line,world,name,baselineKey,alternateKey,holdouts=0,prefix=[]}=plan||{};
+    if(!Number.isSafeInteger(line)||line<1||!/^[a-f0-9]{64}$/.test(world)||typeof name!=='string'||
+      !key(baselineKey)||!key(alternateKey)||baselineKey===alternateKey||!Number.isInteger(holdouts)||holdouts<0||holdouts>32||
+      !Array.isArray(prefix)||prefix.length>100||prefix.some(a=>!key(a?.key)||!['play_land','cast','activate','choice','pass'].includes(a.kind)||
+        ![0,1,'0','1'].includes(a.actorId)))throw Error('对照计划中的操作、节点或暗手编号无效。');
+    return {line,world,name,baselineKey,alternateKey,holdouts,
+      prefix:prefix.map(({key,kind,actorId,label})=>({key,kind,actorId,label:String(label||'').slice(0,1000)}))};
+  });
+}
 function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),client=null,forgeClient=null,initialReplay=null,reviewBudget={},reviewNodeLimit=8,runners={}}={}){
   const replays=new Map(),jobs=new Map(),session=crypto.randomBytes(32).toString('hex');let currentId=null;
   const runtime=path.join(dataDir,'runtime');const codex=client||new CodexClient({cwd:runtime});
-  const forge=forgeClient||new ForgeClient({dataDir}),deckService=new DeckService({directory:path.join(dataDir,'decks')});
+  const forge=forgeClient||new ForgePool({dataDir}),deckService=new DeckService({directory:path.join(dataDir,'decks')});
   const modelQueue=createModelQueue(2);
   const branchChecks=new WeakMap();
   const engineCache=forgeCacheDir(forge,dataDir);
@@ -39,20 +54,24 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
     try{const cached=JSON.parse(await fs.readFile(path.join(profileDir,id+'.json'),'utf8'));if(cached.version===3&&cached.replayId===id)prepared=cached;}catch{}
     try{
       const cached=JSON.parse(await fs.readFile(path.join(engineCache,'forge-reviews',id+'.json'),'utf8'));
-      if(cached.reviewVersion===REVIEW_VERSION&&(!prepared?.preparedAt||prepared.preparedAt<=(cached.completedAt||''))){
-        replay.review=P.validateReview(cached.review,model);replay.searchEvidence=cached.evidence||[];
+      if(!prepared?.preparedAt||prepared.preparedAt<=(cached.completedAt||'')){
         if(cached.matchDecks)replay.matchDecks={...cached.matchDecks,catalog:new Map(cached.matchDecks.catalog)};
+        if(cached.reviewVersion===REVIEW_VERSION){
+          replay.review=P.validateReview(cached.review,model);replay.searchEvidence=cached.evidence||[];
+        }
       }
     }catch{}
     if(!replay.matchDecks&&prepared)try{replay.matchDecks={...prepared.profile,catalog:new Map(prepared.profile.catalog)};}catch{}
+    const branchDecks=!replay.matchDecks&&descriptionDeckPreferences(model.header);
+    if(branchDecks)try{replay.matchDecks=await prepareMatchDecks({model,forge,deckService,deckPreferences:branchDecks});}catch{}
     replays.set(id,replay);currentId=id;
     await fs.mkdir(path.join(dataDir,'replays'),{recursive:true});await fs.writeFile(path.join(dataDir,'replays',id+'.jsonl.gz'),zlib.gzipSync(Buffer.from(text)));await fs.writeFile(path.join(dataDir,'current.json'),JSON.stringify({id,filename}));return replay;
   }
   function snapshot(job){
     const unchecked=job.result?.downloadUrl&&!job.result?.quality?.keep;
     let result=unchecked?{quality:{keep:false,reason:'旧测试分支尚未经过胜局与AI二筛，已停止提供下载。'}}:job.result;
-    if(job.status==='complete'&&result?.review&&result.reviewVersion!==REVIEW_VERSION)result={...result,review:undefined,evidence:undefined};
-    return{id:job.id,replayId:job.replayId,type:job.type,sourceLine:job.sourceLine,parentJobId:job.parentJobId||null,intent:job.intent||'',stressCards:job.stressCards||[],reviewOptions:job.reviewOptions,status:job.status,phase:job.phase,message:unchecked?'旧测试分支尚未经过胜局与AI二筛，已停止提供下载。':job.message,events:job.events,createdAt:job.createdAt,result:result||null,error:job.error||null,errorCode:job.errorCode||null};
+    if(job.status==='complete'&&result?.review&&result.reviewVersion!==REVIEW_VERSION)result={...result,review:undefined,evidence:undefined,unsupported:undefined};
+    return{id:job.id,replayId:job.replayId,type:job.type,sourceLine:job.sourceLine,game:job.game,parentJobId:job.parentJobId||null,intent:job.intent||'',stressCards:job.stressCards||[],reviewOptions:job.reviewOptions,status:job.status,phase:job.phase,message:unchecked?'旧测试分支尚未经过胜局与AI二筛，已停止提供下载。':job.message,events:job.events,createdAt:job.createdAt,result:result||null,error:job.error||null,errorCode:job.errorCode||null};
   }
   async function save(job){const contents=JSON.stringify(snapshot(job),null,2);job.savePromise=(job.savePromise||Promise.resolve()).catch(()=>{}).then(async()=>{await fs.mkdir(job.dir,{recursive:true});await fs.writeFile(path.join(job.dir,'job.json'),contents);});try{await job.savePromise;}catch{}}
   function progress(job,phase,message){job.phase=phase;job.message=message;const event={at:Date.now(),phase,message};job.events.push(event);if(job.events.length>100)job.events.shift();fs.appendFile(path.join(job.dir,'progress.jsonl'),JSON.stringify(event)+'\n').catch(()=>{});save(job);}
@@ -112,6 +131,7 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
   async function run(job,replay,focus){
     try{
       if(job.type==='review'){const outcome=await review(job,replay);job.result={...job.result,...outcome};}
+      else if(job.type==='forge-findings')job.result=await runForgeFindings({job,replay,forge,progress});
       else if(job.type==='prepare')job.result=await prepareOnly({job,replay,ask,progress,forge,deckService,profileDir});
       else if(job.type==='shortlist')job.result=await shortlistOnly({job,replay,ask,progress});
       else if(job.type==='quality')job.result=await runBranchQuality({job,parent:jobs.get(job.parentJobId),replay,ask,progress,forge});
@@ -119,7 +139,8 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
       if(job.result?.review)job.result.reviewVersion=REVIEW_VERSION;
       if(job.abort.signal.aborted)throw Error('任务已取消。');
       job.status='complete';
-      const stageMessages={review:'整盘复盘完成，建议附有 Forge 搜索证据。',prepare:'对局已准备好。可以在中文战报里选节点，输入打法并开始搜索。',shortlist:'AI 已标出候选节点。选中一个节点后可以单独搜索。'};
+      const stageMessages={review:'整盘复盘完成，建议附有 Forge 搜索证据。',prepare:'对局已准备好。可以让 Forge 找关键手，或在中文战报选择分支起点。',shortlist:'AI 已标出候选节点。选中一个节点后可以单独搜索。',
+        'forge-findings':'Forge 对照完成，已生成 '+(job.result?.comparisons?.length||0)+' 组可核对回放。'};
       let message=stageMessages[job.type];
       if(!message){
         if(job.type==='search'&&job.result?.searchSummary)message='Forge 搜索完成，可查看搜索结果。';
@@ -135,7 +156,8 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
         job.status='failed';job.error=e.message;
         const deckMessages={deck_not_found:'未查询到牌表。请选择其他来源或上传牌表后重试。',deck_lookup_failed:'牌表查询失败。请查看原因后重试，或换一个来源。',deck_upload_invalid:'上传牌表未通过校验。请检查牌表后重试。'};
         if(e instanceof DeckLookupError)job.errorCode=e.code;
-        const stageErrors={review:'复盘未完成，已保留诊断和已完成的搜索结果。',prepare:'准备对局失败，请查看下方原因。',shortlist:'AI 初筛未完成。',search:'Forge 搜索未完成。',quality:'AI 二筛未完成，搜索结果已保留。'};
+        const stageErrors={review:'复盘未完成，已保留诊断和已完成的搜索结果。',prepare:'准备对局失败，请查看下方原因。',shortlist:'AI 初筛未完成。',search:'Forge 搜索未完成。',quality:'AI 二筛未完成，搜索结果已保留。',
+          'forge-findings':'Forge 对照未完成，请查看下方原因。'};
         progress(job,'failed',deckMessages[job.errorCode]||stageErrors[job.type]||'分支没有通过检查，未发布未经验证的回放。');
       }
     }finally{await save(job);}
@@ -151,16 +173,34 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
         if(!req.headers.cookie?.split(';').some(c=>c.trim()==='endstep_session='+session))return apiError(res,401,'请从应用首页打开。');
         if(!['GET','HEAD'].includes(req.method)&&((req.headers.origin&&req.headers.origin!=='http://'+host)||req.headers['x-endstep-request']!=='1'))return apiError(res,403,'请求来源无效。');
         if(req.method==='GET'&&url.pathname==='/api/forge/version')return json(res,await checkForgeRelease(forge));
-        if(req.method==='GET'&&url.pathname==='/api/health'){try{return json(res,{...(await codex.status()),forge:await forge.status(),version,mode:'forge-search'});}catch(e){return json(res,{connected:false,loggedIn:false,error:e.message,mode:'connected'});}}
-        if(req.method==='GET'&&url.pathname==='/api/current'){const r=replays.get(currentId);return json(res,r?{id:r.id,filename:r.filename,jsonl:r.model.sourceText,review:r.review,evidence:r.searchEvidence||[],deckProfiles:publicDeckProfile(r.matchDecks),jobs:[...jobs.values()].filter(j=>j.replayId===r.id).map(snapshot)}:null);}
+        if(req.method==='GET'&&url.pathname==='/api/health'){
+          const [model,rules]=await Promise.allSettled([codex.status(),forge.status()]);
+          return json(res,{...(model.status==='fulfilled'?model.value:{connected:false,loggedIn:false,error:model.reason.message}),
+            forge:rules.status==='fulfilled'?rules.value:null,version,mode:'forge-search'});
+        }
+        if(req.method==='GET'&&url.pathname==='/api/current'){const r=replays.get(currentId);return json(res,r?{id:r.id,filename:r.filename,jsonl:r.model.sourceText,review:r.review,evidence:r.searchEvidence||[],deckProfiles:publicDeckProfile(r.matchDecks),jobs:[...jobs.values()].filter(j=>j.replayId===r.id&&!(j.type==='review'&&j.status==='complete'&&j.result?.reviewVersion!==REVIEW_VERSION)).map(snapshot)}:null);}
         if(req.method==='POST'&&url.pathname==='/api/replays'){const b=await body(req);if(typeof b.jsonl!=='string'||typeof b.filename!=='string')throw Error('回放输入格式无效。');const r=await register(b.jsonl,b.filename);return json(res,{id:r.id,review:r.review,evidence:r.searchEvidence||[],deckProfiles:publicDeckProfile(r.matchDecks)});}
+        if(req.method==='GET'&&parts[1]==='replays'&&parts[3]==='priorities'&&parts.length===4){
+          const replay=replays.get(parts[2]);
+          if(!replay)return apiError(res,404,'请选择已导入的回放。');
+          replay.priorityNodes??=Source.priorityCandidates(replay.model.sourceText);
+          return json(res,replay.priorityNodes.map(({sourceLine,t,game,turn,phase,priorityPlayerId,kind,cardName})=>
+            ({sourceLine,t,game,turn,phase,priorityPlayerId,kind,cardName})));
+        }
         if(req.method==='GET'&&parts[1]==='replays'&&parts[3]==='branch-start'&&parts.length===4){
           const replay=replays.get(parts[2]),line=Number(url.searchParams.get('line'));
           if(!replay||!Number.isSafeInteger(line)||line<1)return apiError(res,400,'请选择已导入回放中的具体操作。');
           return json(res,await checkBranchStart(replay,line,{findEarlier:true}));
         }
         if(req.method==='POST'&&url.pathname==='/api/jobs'){
-          const b=await body(req),r=replays.get(b.replayId);if(!r||!['review','prepare','shortlist','plan','search','branch','quality'].includes(b.type))throw Error('请选择已导入的对局和有效任务。');
+          const b=await body(req),r=replays.get(b.replayId);if(!r||!['review','prepare','shortlist','plan','search','branch','quality','forge-findings'].includes(b.type))throw Error('请选择已导入的对局和有效任务。');
+          let game,comparisonPlan;
+          if(b.type==='forge-findings'){
+            if(!r.matchDecks)return apiError(res,409,'请先准备对局，固定双方牌表。');
+            comparisonPlan=readComparisonPlan(b.comparisonPlan);
+            game=b.game??r.model.turns[0]?.game;
+            if(!Number.isSafeInteger(game)||!r.model.turns.some(t=>t.game===game))throw Error('请选择回放中的一局。');
+          }
           const nodeJob=['plan','search','branch'].includes(b.type),profileJob=['review','prepare'].includes(b.type);
           let parent;
           if(b.type==='quality'){
@@ -180,18 +220,33 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
           const reviewOptions=b.type==='review'?readReviewOptions(b.reviewOptions):undefined;
           const manualSideboard=profileJob&&b.manualSideboard!=null?readManualSideboard(b.manualSideboard):undefined;
           const running=[...jobs.values()].filter(j=>j.status==='running');
-          const existing=running.find(j=>j.replayId===r.id&&j.type===b.type&&j.sourceLine===sourceLine&&j.parentJobId===(parent?.id||null)&&JSON.stringify(j.reviewOptions)===JSON.stringify(reviewOptions)&&JSON.stringify(j.manualSideboard)===JSON.stringify(manualSideboard)&&(profileJob||j.intent===focus&&JSON.stringify(j.stressCards||[])===JSON.stringify(stressCards)));if(existing)return json(res,snapshot(existing));
+          const existing=running.find(j=>j.replayId===r.id&&j.type===b.type&&j.sourceLine===sourceLine&&j.game===game&&
+            JSON.stringify(j.comparisonPlan)===JSON.stringify(comparisonPlan)&&j.parentJobId===(parent?.id||null)&&JSON.stringify(j.reviewOptions)===JSON.stringify(reviewOptions)&&JSON.stringify(j.manualSideboard)===JSON.stringify(manualSideboard)&&(profileJob||j.intent===focus&&JSON.stringify(j.stressCards||[])===JSON.stringify(stressCards)));if(existing)return json(res,snapshot(existing));
           if(profileJob&&running.some(j=>j.replayId===r.id&&['review','prepare'].includes(j.type)))return apiError(res,409,'这个对局正在更新牌表，请稍后再试。');
           if([...jobs.values()].filter(j=>j.status==='running').length>=2)return apiError(res,429,'已有两个任务正在执行，请稍后再试。');
           if(nodeJob)Scenario.sourceAt(r.model.sourceText,sourceLine);
           const deckPreferences=profileJob?readDeckPreferences(b.deckPreferences):null;
-          const id=crypto.randomUUID(),job={id,replayId:r.id,type:b.type,sourceLine,parentJobId:parent?.id||null,intent:focus,stressCards,deckPreferences,reviewOptions,manualSideboard,forceReview:b.type==='review'&&!!r.review,status:'running',phase:'queued',message:'任务已提交。',createdAt:Date.now(),events:[],dir:path.join(dataDir,'jobs',id),abort:new AbortController()};
+          const id=crypto.randomUUID(),job={id,replayId:r.id,type:b.type,sourceLine,game,comparisonPlan,parentJobId:parent?.id||null,intent:focus,stressCards,deckPreferences,reviewOptions,manualSideboard,forceReview:b.type==='review'&&!!r.review,status:'running',phase:'queued',message:'任务已提交。',createdAt:Date.now(),events:[],dir:path.join(dataDir,'jobs',id),abort:new AbortController()};
           jobs.set(id,job);try{await fs.mkdir(job.dir,{recursive:true});}catch(error){jobs.delete(id);throw error;}
           run(job,r,job.intent);return json(res,snapshot(job));
         }
         if(parts[1]==='jobs'&&jobs.has(parts[2])){
           const job=jobs.get(parts[2]);if(req.method==='DELETE'){if(job.status==='running')job.abort.abort();return json(res,snapshot(job));}
           if(req.method==='GET'&&parts.length===3)return json(res,snapshot(job));
+          if(req.method==='GET'&&job.type==='forge-findings'&&job.status==='complete'){
+            if(parts.length===4&&parts[3]==='comparison-plan'&&job.result?.planUrl===url.pathname){
+              const file=await fs.readFile(path.join(job.dir,'comparison-plan.json'));
+              res.writeHead(200,{'Content-Type':'application/json; charset=utf-8','Content-Disposition':'attachment; filename="forge-comparisons.json"'});
+              return res.end(file);
+            }
+            if(parts.length===6&&parts[3]==='comparisons'&&/^\d+$/.test(parts[4])&&/^[01]$/.test(parts[5])){
+              const [i,j]=parts.slice(4).map(Number),arm=job.result?.comparisons?.[i]?.arms?.[j];
+              if(arm?.downloadUrl!==url.pathname)return apiError(res,404,'对照回放不存在。');
+              const file=await fs.readFile(path.join(job.dir,'comparison-'+i+'-'+j+'.esreplay'));
+              res.writeHead(200,{'Content-Type':'application/gzip','Content-Disposition':"attachment; filename*=UTF-8''"+encodeURIComponent(arm.file)});
+              return res.end(file);
+            }
+          }
           if(req.method==='GET'&&parts[3]==='nodes'&&/^\d+$/.test(parts[4]||'')&&parts[5]==='replay'&&parts.length===6){
             const line=Number(parts[4]),evidence=job.result?.evidence?.find(e=>e.sourceLine===line);
             if(job.status!=='complete'||!Number.isSafeInteger(line)||!evidence?.quality?.keep||evidence.downloadUrl!==url.pathname)return apiError(res,409,'此节点没有保留的改进胜局。');
@@ -216,7 +271,7 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
     if(initialReplay){let raw=await fs.readFile(initialReplay);if(raw[0]===31&&raw[1]===139)raw=zlib.gunzipSync(raw,{maxOutputLength:32*1024*1024});await register(raw.toString('utf8'),path.basename(initialReplay));}
     else try{const current=JSON.parse(await fs.readFile(path.join(dataDir,'current.json'),'utf8'));if(/^[a-f0-9]{64}$/.test(current.id)){const raw=zlib.gunzipSync(await fs.readFile(path.join(dataDir,'replays',current.id+'.jsonl.gz')),{maxOutputLength:32*1024*1024});await register(raw.toString('utf8'),current.filename);}}catch{}
     let directories=[];try{directories=await fs.readdir(path.join(dataDir,'jobs'));}catch{}
-    for(const id of directories){if(!/^[a-f0-9-]{36}$/.test(id))continue;try{const stored=JSON.parse(await fs.readFile(path.join(dataDir,'jobs',id,'job.json'),'utf8'));if(stored.id!==id)continue;const job={...stored,dir:path.join(dataDir,'jobs',id),abort:new AbortController()};if(job.status==='running'){job.status='failed';job.phase='interrupted';job.message='后端已重新启动，上次任务已中断，可以重新提交。';job.error='任务没有继续执行，未发布未经检查的新回放。';}jobs.set(id,job);await save(job);}catch{}}
+    for(const id of directories){if(!/^[a-f0-9-]{36}$/.test(id))continue;try{const stored=JSON.parse(await fs.readFile(path.join(dataDir,'jobs',id,'job.json'),'utf8'));if(stored.id!==id)continue;const job={...stored,dir:path.join(dataDir,'jobs',id),abort:new AbortController()};if(job.status==='running'){job.status='failed';job.phase='interrupted';job.message='后端已重新启动，上次任务已中断，可以重新提交。';job.error='任务没有继续执行，未发布未经检查的新回放。';await save(job);}jobs.set(id,job);}catch{}}
     await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve);});return'http://127.0.0.1:'+server.address().port;
   },async close(){for(const job of jobs.values())job.abort.abort();codex.close();forge.close();server.closeAllConnections();await new Promise(resolve=>server.close(resolve));}};
 }

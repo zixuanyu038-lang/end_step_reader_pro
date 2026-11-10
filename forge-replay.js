@@ -87,6 +87,7 @@ function compileReplay(source,run,{title='推荐分支',summary='',world,evidenc
       event(type,`${p?.name||a.actorId} ${a.kind==='cast'?'cast':a.kind==='activate'?'activated':'played'} ${a.cardName}`,{cardId:a.cardId,cardName:a.cardName,playerIndex:String(a.actorId),playerName:p?.name});
       event('ADD_LOG','[Forge 支付] '+paymentText(a));
     }
+    if(frame.kind==='choice')event('ADD_LOG','[结算时选牌] '+frame.label);
     for(const message of frame.logs||[])if(message)event('ADD_LOG',message);
   }
   if(complete){const winner=run.state.winnerId;event('GAME_OUTCOME',winner==null?'Forge 判定本局平局':'Forge hypothetical winner: '+source.baseline.players.find(p=>String(p.id)===String(winner))?.name,{playerIndex:winner==null?undefined:String(winner),turnNumber:run.state.turnNumber,endReason:'forge-engine-outcome'});}
