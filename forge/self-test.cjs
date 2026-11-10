@@ -28,9 +28,51 @@ async function checkForgeRuntime(client){
   assert.ok(!intentRun.trace.some(f=>f.action?.cardName==='Consign to Memory'&&f.state.stack.some(item=>item.isTrigger&&item.sourceCard.id===9)),'The replaced spell stays banned during the original exchange');
 }
 
+async function checkRaptorTrigger(client){
+  const root={seed:20261106,viewerId:1,names:['Opponent','Player'],gameId:'raptor-regression',
+    activePlayerId:1,priorityPlayerId:1,firstPriorityId:1,history:[{},{}],
+    decks:[{main:[{name:'Plains',count:60}]},{main:[{name:'Mountain',count:60}]}],
+    stateText:[
+      'turn=3','activeplayer=p1','activephase=MAIN1','p0life=20','p1life=20',
+      'p0hand=Swords to Plowshares|Id:20','p0battlefield=Plains|Id:21',
+      'p1hand=Amped Raptor|Id:11','p1battlefield=Mountain|Id:10;Mountain|Id:12',
+      'p0library=Plains|Id:30;Plains|Id:31',
+      'p1library=Mountain|Id:40;Hill Giant|Id:41;Mountain|Id:42;Mountain|Id:43',
+    ].join('\n')+'\n'};
+  const initial=await client.request({command:'expand',root});
+  const cast=initial.actions.find(a=>a.cardName==='Amped Raptor'&&a.kind==='cast');
+  assert.ok(cast,'Amped Raptor must be castable from hand');
+  const path=[cast];
+  for(let i=0;i<6;i++){
+    const node=await client.request({command:'expand',root,path});
+    const swords=node.actions.find(a=>a.cardName==='Swords to Plowshares'&&a.targets.flat().includes('c:11'));
+    if(swords){path.push(swords);break;}
+    const pass=node.actions.find(a=>a.kind==='pass');
+    assert.ok(pass,'The engine must expose each priority window');
+    path.push(pass);
+  }
+  assert.equal(path.at(-1).cardName,'Swords to Plowshares');
+  const removed=await client.request({command:'simulate',root,path,includeTrace:true,horizonTurns:1});
+  const resolved=removed.trace.find(f=>f.state.players[1].exile.some(c=>c.id===11)&&f.state.players[1].exile.some(c=>c.id===41));
+  assert.ok(resolved,'Raptor cast from hand still exiles to a nonland if removed before its enter trigger resolves');
+
+  const reanimate={...root,stateText:root.stateText
+    .replace('p0hand=Swords to Plowshares|Id:20','p0hand=')
+    .replace('p1hand=Amped Raptor|Id:11','p1hand=Unearth|Id:13\np1graveyard=Amped Raptor|Id:11')
+    .replace('Mountain|Id:10;Mountain|Id:12','Swamp|Id:10;Mountain|Id:12')};
+  const menu=await client.request({command:'expand',root:reanimate});
+  const unearth=menu.actions.find(a=>a.cardName==='Unearth'&&a.targets.flat().includes('c:11'));
+  assert.ok(unearth,'Unearth must be able to target Raptor in the graveyard');
+  const returned=await client.request({command:'simulate',root:reanimate,path:[unearth],includeTrace:true,horizonTurns:1});
+  assert.ok(returned.trace.some(f=>f.state.players[1].battlefield.some(c=>c.id===11)&&f.state.players[1].energyCounters===2),
+    'Raptor entering without a cast still grants energy');
+  assert.ok(returned.trace.every(f=>!f.state.players[1].exile.some(c=>c.id===41)),
+    'Raptor entering without a cast does not exile from the library');
+}
+
 if(require.main===module){
  const client=new ForgeClient();
- checkForgeRuntime(client)
+ checkForgeRuntime(client).then(()=>checkRaptorTrigger(client))
   .then(()=>console.log(client.engine+' 自检通过。'))
   .catch(error=>{console.error(error.message);process.exitCode=1;})
   .finally(()=>client.close());

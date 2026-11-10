@@ -1,6 +1,7 @@
 'use strict';
 const {isDeepStrictEqual}=require('node:util');
 const Schema=require('./search-schema'),S=require('./studio-schema'),{originalSelection}=require('./tree-search');
+const {verifyPair}=require('./paired-review');
 const won=(run,viewer)=>run.stopReason==='game_over'&&run.state.status==='COMPLETE'&&String(run.state.winnerId)===String(viewer);
 const summarize=run=>({stopReason:run.stopReason,winnerId:run.state.winnerId??null,turn:run.state.turnNumber,features:run.evaluation.features,actions:(run.executed||[]).slice(0,120)});
 function finalists(result,limit=6){
@@ -18,9 +19,12 @@ async function selectWinningLines({records,forge,ask,signal,onProgress=()=>{}}){
   onProgress('已筛出胜局，正在同世界核对原打法…');const baselines=[];
   for(const world of worlds){
    const root={...world.root};delete root.intent;
-   const expanded=await forge.request({command:'expand',root},{signal}),original=originalSelection(source,expanded.actions);
-   if(!original.matched){baselines.push({worldId:world.id,unavailable:original.reason});continue;}
-   try{const run=await forge.request({command:'simulate',root,path:[original.action],includeTrace:false,horizonTurns:100,maxChoices:2000,maxSteps:4000},{signal});baselines.push({worldId:world.id,...summarize(run)});}catch(e){if(signal?.aborted)throw e;baselines.push({worldId:world.id,unavailable:e.message});}
+   try{
+    const expanded=await forge.request({command:'expand',root},{signal}),original=originalSelection(source,expanded.actions);
+    if(!original.matched){baselines.push({worldId:world.id,unavailable:original.reason});continue;}
+    const run=await forge.request({command:'simulate',root,path:[original.action],includeTrace:false,horizonTurns:100,maxChoices:2000,maxSteps:4000},{signal});
+    baselines.push({worldId:world.id,...summarize(run)});
+   }catch(e){if(signal?.aborted)throw e;baselines.push({worldId:world.id,unavailable:e.message});}
   }
   result.originalBaselines=baselines;result.qualityFinalists=candidates.map(c=>c.id);
   const losingSeen=new Set(),counterexamples=(result.runs||[]).flatMap(w=>w.simulations.filter(s=>s.terminal&&s.winnerId!=null&&String(s.winnerId)!==String(source.header.seat)).map(s=>({worldId:w.worldId,path:s.path,turn:s.turn,winnerId:s.winnerId}))).filter(s=>{const key=JSON.stringify([s.worldId,s.path]);if(losingSeen.has(key))return false;losingSeen.add(key);return true;}).slice(0,12);
@@ -35,7 +39,16 @@ async function selectWinningLines({records,forge,ask,signal,onProgress=()=>{}}){
    if(chosen.keep&&!candidate)throw Error('AI选择了不存在的胜局。');
    record.result.quality={...chosen,candidateId:chosen.keep?chosen.candidateId:'',keep:!!chosen.keep};
    if(chosen.keep){const world=record.worlds.find(w=>w.id===candidate.worldId),run=await forge.request({command:'simulate',root:world.root,path:candidate.path,includeTrace:true,horizonTurns:100,maxChoices:2000,maxSteps:4000},{signal});
-    if(!won(run,record.source.header.seat)||(run.intentStatus?.blocked||[]).length||run.intentStatus?.completed!==run.intentStatus?.total||run.state.turnNumber!==candidate.turn||!isDeepStrictEqual(run.executed,candidate.executed))throw Error('筛选胜局未能稳定重放，未保留。');
+    if(!won(run,record.source.header.seat)||(run.intentStatus?.blocked||[]).length||run.intentStatus?.completed!==run.intentStatus?.total||run.state.turnNumber!==candidate.turn||!isDeepStrictEqual(run.executed,candidate.executed)){
+      if(!record.buildHoldout)throw Error('筛选胜局未能稳定重放，未保留。');
+      record.result.quality={keep:false,reason:'引擎复演与发现时的轨迹不一致，已保留原局与搜索记录。',risks:[],confidence:'low'};
+      continue;
+    }
+    if(record.buildHoldout){
+      onProgress('正在锁定对手反手，并用新牌序逐对比较原打法和替代打法…');
+      const worlds=record.buildHoldout();
+      record.result.pairedVerification=await verifyPair({source:record.source,candidate,discoveryWorld:world,worlds,forge,signal});
+    }
     record.result.representative={worldId:world.id,scenario:world.scenario,path:candidate.path,...run};
     const selected=(record.result.alternatives||[]).find(a=>a.action.key===candidate.path[0]?.key),original=record.result.original;
     record.result.selectedAlternative=selected||null;

@@ -6,7 +6,7 @@ const {createModelQueue}=require('./model-queue');
 const {ForgeClient}=require('./forge-client'),{DeckService,DeckLookupError,readDeckPreferences}=require('./deck-service');
 const {checkForgeRelease}=require('./forge-release');
 const {forgeCacheDir}=require('./forge-runtime');
-const {runForgeReview,prepareOnly,shortlistOnly,publicDeckProfile}=require('./search-review'),{runForgeBranch,runBranchQuality,inspectBranchStart}=require('./search-branch'),SearchProtocol=require('./search-protocol');
+const {REVIEW_VERSION,runForgeReview,prepareOnly,shortlistOnly,publicDeckProfile}=require('./search-review'),{runForgeBranch,runBranchQuality,inspectBranchStart}=require('./search-branch'),SearchProtocol=require('./search-protocol');
 const {readManualSideboard}=require('./match-decks');
 const Source=require('./search-source');
 const {version}=require('./package.json');
@@ -39,7 +39,7 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
     try{const cached=JSON.parse(await fs.readFile(path.join(profileDir,id+'.json'),'utf8'));if(cached.version===3&&cached.replayId===id)prepared=cached;}catch{}
     try{
       const cached=JSON.parse(await fs.readFile(path.join(engineCache,'forge-reviews',id+'.json'),'utf8'));
-      if(cached.reviewVersion==='forge-search-v2-wins'&&(!prepared?.preparedAt||prepared.preparedAt<=(cached.completedAt||''))){
+      if(cached.reviewVersion===REVIEW_VERSION&&(!prepared?.preparedAt||prepared.preparedAt<=(cached.completedAt||''))){
         replay.review=P.validateReview(cached.review,model);replay.searchEvidence=cached.evidence||[];
         if(cached.matchDecks)replay.matchDecks={...cached.matchDecks,catalog:new Map(cached.matchDecks.catalog)};
       }
@@ -51,7 +51,7 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
   function snapshot(job){
     const unchecked=job.result?.downloadUrl&&!job.result?.quality?.keep;
     let result=unchecked?{quality:{keep:false,reason:'旧测试分支尚未经过胜局与AI二筛，已停止提供下载。'}}:job.result;
-    if(job.status==='complete'&&result?.review&&result.reviewVersion!=='forge-search-v2-wins')result={...result,review:undefined,evidence:undefined};
+    if(job.status==='complete'&&result?.review&&result.reviewVersion!==REVIEW_VERSION)result={...result,review:undefined,evidence:undefined};
     return{id:job.id,replayId:job.replayId,type:job.type,sourceLine:job.sourceLine,parentJobId:job.parentJobId||null,intent:job.intent||'',stressCards:job.stressCards||[],reviewOptions:job.reviewOptions,status:job.status,phase:job.phase,message:unchecked?'旧测试分支尚未经过胜局与AI二筛，已停止提供下载。':job.message,events:job.events,createdAt:job.createdAt,result:result||null,error:job.error||null,errorCode:job.errorCode||null};
   }
   async function save(job){const contents=JSON.stringify(snapshot(job),null,2);job.savePromise=(job.savePromise||Promise.resolve()).catch(()=>{}).then(async()=>{await fs.mkdir(job.dir,{recursive:true});await fs.writeFile(path.join(job.dir,'job.json'),contents);});try{await job.savePromise;}catch{}}
@@ -116,7 +116,7 @@ function createStudio({port=8787,dataDir=path.join(__dirname,'.endstep-data'),cl
       else if(job.type==='shortlist')job.result=await shortlistOnly({job,replay,ask,progress});
       else if(job.type==='quality')job.result=await runBranchQuality({job,parent:jobs.get(job.parentJobId),replay,ask,progress,forge});
       else job.result=await (runners.branch||runForgeBranch)({job,replay,ask,progress,forge,deckService,profileDir,focus});
-      if(job.result?.review)job.result.reviewVersion='forge-search-v2-wins';
+      if(job.result?.review)job.result.reviewVersion=REVIEW_VERSION;
       if(job.abort.signal.aborted)throw Error('任务已取消。');
       job.status='complete';
       const stageMessages={review:'整盘复盘完成，建议附有 Forge 搜索证据。',prepare:'对局已准备好。可以在中文战报里选节点，输入打法并开始搜索。',shortlist:'AI 已标出候选节点。选中一个节点后可以单独搜索。'};

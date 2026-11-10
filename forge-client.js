@@ -46,7 +46,7 @@ class ForgeClient {
       const timer=setTimeout(()=>{child.kill();reject(Error('Forge 牌库初始化超时。'));},90000);
       createInterface({input:child.stdout}).on('line',line=>{
         let message;try{message=JSON.parse(line);}catch{return;}
-        if(message.ready){clearTimeout(timer);resolve();return;}
+        if(message.ready){clearTimeout(timer);this.rules=message.rules;resolve();return;}
         const p=this.pending.get(message.id);if(!p)return;this.pending.delete(message.id);clearTimeout(p.timer);
         if(message.ok)p.resolve({...message.result,engine:this.engine});
         else{

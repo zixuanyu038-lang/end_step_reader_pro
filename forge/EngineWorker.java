@@ -2,6 +2,7 @@ import com.google.gson.*;
 import forge.GuiDesktop;
 import forge.StaticData;
 import forge.card.GamePieceType;
+import forge.card.CardRules;
 import forge.LobbyPlayer;
 import forge.gui.GuiBase;
 import forge.model.FModel;
@@ -24,7 +25,10 @@ import forge.util.MyRandom;
 import java.io.*;
 import java.lang.reflect.*;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.*;
+import java.security.MessageDigest;
 import java.util.*;
+import java.util.zip.ZipFile;
 
 /** Pinned Forge 2.0.15 adapter. Every simulation rebuilds its root and replays its path;
  * no GameCopier or model-authored state mutations are used in search/continuations. */
@@ -556,10 +560,47 @@ public final class EngineWorker {
         List<JsonObject> actions=new ArrayList<>();if(stopped.equals("decision"))for(Choice choice:candidates(c,c.game.getPhaseHandler().getPriorityPlayer()))actions.add(choice.action);
         output.add("actions",JSON.toJsonTree(actions));return output;
     }
+    static String applyRaptorRules()throws Exception {
+        Path archive=Path.of("res","cardsfolder","cardsfolder.zip");
+        if(!Files.isRegularFile(archive))return "runtime";
+        byte[] raw;
+        try(ZipFile zip=new ZipFile(archive.toFile())){
+            var entry=zip.getEntry("a/amped_raptor.txt");
+            if(entry==null)return "runtime";
+            try(InputStream input=zip.getInputStream(entry)){raw=input.readAllBytes();}
+        }
+        var digest=MessageDigest.getInstance("SHA-256");
+        if(!HexFormat.of().formatHex(digest.digest(raw)).equals("7eab9bed8039ca91e1340351c0f51bcbc16ccbf2e7692dc62ad02fddf537b0ca"))return "runtime";
+
+        // Freeze the from-hand condition when the trigger is created. Checking it
+        // at resolution reads the new object if Raptor left the battlefield.
+        List<String> patched=new ArrayList<>();
+        for(String line:new String(raw,StandardCharsets.UTF_8).lines().toList()){
+            if(line.startsWith("T:Mode$ ChangesZone")){
+                patched.add(line.replace("Card.Self","Card.Self+wasCastFromYourHandByYou"));
+                patched.add(line.replace("Card.Self","Card.Self+!wasCastFromYourHandByYou")
+                    .replace("Execute$ TrigEnergy","Execute$ TrigEnergyOnly"));
+            }else if(line.startsWith("SVar:TrigEnergy:")){
+                patched.add(line);
+                patched.add(line.replace("SVar:TrigEnergy:","SVar:TrigEnergyOnly:").replace(" | SubAbility$ DBDigUntil",""));
+            }else{
+                patched.add(line.replace(" | ConditionDefined$ TriggeredCard | ConditionPresent$ Card.wasCastFromYourHandByYou",""));
+            }
+        }
+        byte[] bytes=(String.join("\n",patched)+"\n").getBytes(StandardCharsets.UTF_8);
+        require(HexFormat.of().formatHex(digest.digest(bytes)).equals("8111ba468341a5711a1da47f34e22fec1cddc776b47b938772d1326ee5aeb3a4"),
+            "Unexpected Amped Raptor rules override");
+        var card=StaticData.instance().getCommonCards().getCard("Amped Raptor");
+        var reinitialize=CardRules.class.getDeclaredMethod("reinitializeFromRules",CardRules.class);
+        reinitialize.setAccessible(true);
+        reinitialize.invoke(card.getRules(),CardRules.fromScript(patched));
+        return "raptor-source-v1";
+    }
     public static void main(String[] args)throws Exception {
         PrintStream protocol=System.out;System.setOut(System.err);System.setProperty("java.awt.headless","true");
         GuiBase.setInterface(new GuiDesktop());FModel.initialize(null,null);
-        protocol.println(JSON.toJson(Map.of("ready",true,"engine",args.length>0?args[0]:"unknown")));protocol.flush();
+        String rules=applyRaptorRules();
+        protocol.println(JSON.toJson(Map.of("ready",true,"engine",args.length>0?args[0]:"unknown","rules",rules)));protocol.flush();
         BufferedReader input=new BufferedReader(new InputStreamReader(System.in,StandardCharsets.UTF_8));String line;
         while((line=input.readLine())!=null){
             JsonObject response=new JsonObject();

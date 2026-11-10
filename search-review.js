@@ -5,7 +5,9 @@ const {buildWorld}=require('./hidden-worlds'),{search,inspectSearchWorlds}=requi
 const {prepareMatchDecks}=require('./match-decks');
 const {routeFromTrace,compileReplay}=require('./forge-replay');
 const {selectWinningLines}=require('./winning-lines');
+const {publicVerification}=require('./paired-review');
 const {baseEngine}=require('./forge-runtime');
+const REVIEW_VERSION='forge-search-v3-paired';
 const digest=x=>crypto.createHash('sha256').update(x).digest('hex');
 const packProfile=profile=>({...profile,catalog:[...profile.catalog]});
 const publicDeckProfile=profile=>profile?{byGame:profile.byGame,sideboardPlans:profile.sideboardPlans,scope:profile.scope,manualSideboard:profile.manualSideboard||[]}:null;
@@ -74,10 +76,24 @@ function seeds(source,count=3){
   const prefix=source.rows.filter(x=>x.line<source.anchor.line).map(x=>x.raw).join('\n');
   const base=parseInt(digest(prefix).slice(0,8),16);return Array.from({length:count},(_,i)=>(base+Math.imul(i+1,2654435761))>>>0);
 }
+function buildHoldout(source,prepared,discovery,count){
+  const seen=new Set(discovery.map(w=>w.root.stateText));
+  const base=digest('paired-holdout-v1:'+seeds(source,1)[0]);
+  const worlds=[];
+  for(let i=0;i<count*2&&worlds.length<count;i++){
+    const seed=parseInt(digest(base+':'+i).slice(0,8),16);
+    if(discovery.some(w=>w.root.seed===seed))continue;
+    const world=buildWorld(source,prepared.decks,prepared.catalog,seed);
+    if(seen.has(world.root.stateText))continue;
+    seen.add(world.root.stateText);
+    worlds.push(world);
+  }
+  return worlds;
+}
 function compactEvidence(record){
   const r=record.result;return{sourceLine:record.node.sourceLine,game:record.source.game,question:record.node.question,engine:r.engine,algorithm:r.algorithm,simulated:r.simulated,searchElapsedMs:r.elapsedMs??null,settings:r.settings,quality:r.quality||null,winningCandidates:r.winningCandidates?.length||0,
     best:r.best,original:r.original,comparison:r.comparison,alternatives:r.alternatives,sourceUrls:[...new Set(record.worlds.flatMap(w=>w.sourceUrls))],worlds:record.worlds.map(w=>({id:w.id,seed:w.root.seed,scenario:w.scenario,hiddenHands:w.hiddenHands,assumptions:w.assumptions})),
-    representativePath:r.representative.path,limitations:r.limitations,artifact:'node-'+record.node.sourceLine+'.json',downloadUrl:record.replayArtifact?.downloadUrl||null,replaySha256:record.replayArtifact?.sha256||null};
+    representativePath:r.representative.path,pairedVerification:publicVerification(r.pairedVerification),limitations:r.limitations,artifact:'node-'+record.node.sourceLine+'.json',downloadUrl:record.replayArtifact?.downloadUrl||null,replaySha256:record.replayArtifact?.sha256||null};
 }
 async function writeWinningReplays(records,job){
   for(const record of records){if(!record.result.quality?.keep)continue;
@@ -117,10 +133,10 @@ async function runForgeReview({job,replay,ask,progress,forge,deckService,cacheDi
   for(const node of queue){
     if(records.length>=nodeLimit)break;if(job.abort.signal.aborted)throw Error('任务已取消。');
     progress(job,'restore',`正在校验第 ${node.game} 局 T${node.turn} · ${node.cardName} 的起点…`);
-    let source,worlds,checkedWorlds;
+    let source,prepared,worlds,checkedWorlds;
     try{
       source=Source.sourceAt(model.sourceText,node.sourceLine);
-      const prepared={decks:matchDecks.byGame[source.game],catalog:matchDecks.catalog};
+      prepared={decks:matchDecks.byGame[source.game],catalog:matchDecks.catalog};
       worlds=buildWorlds(source,prepared,3);
       checkedWorlds=await inspectSearchWorlds({client:forge,source,worlds,signal:job.abort.signal});
     }catch(error){
@@ -135,7 +151,7 @@ async function runForgeReview({job,replay,ask,progress,forge,deckService,cacheDi
       const result=await search({client:forge,source,worlds,checkedWorlds,signal:job.abort.signal,budget,onProgress:p=>{
         if(Date.now()-last>1200||p.iteration===p.iterations){last=Date.now();progress(job,'search',`第 ${node.game} 局 T${node.turn} · 隐藏世界 ${p.world}/${p.worlds} · 搜索 ${p.iteration}/${p.iterations} · 已模拟 ${p.simulated} 次`);}
       }});
-      const record={source,result,worlds,node};records.push(record);evidence.push(compactEvidence(record));
+      const record={source,result,worlds,node,buildHoldout:()=>buildHoldout(source,prepared,worlds,deep?12:8)};records.push(record);evidence.push(compactEvidence(record));
       await fs.writeFile(path.join(directory,'node-'+node.sourceLine+'.json'),JSON.stringify({node,worlds,result},null,2));
       job.result.reviewRevision++;job.result.gameStages=games.map(game=>({game,message:`已搜索 ${records.filter(r=>r.source.game===game).length} 个节点`}));
       progress(job,'search',`已完成 ${records.length}/${nodeLimit} 个关键节点，继续比较其余节点…`);
@@ -168,8 +184,14 @@ async function runForgeReview({job,replay,ask,progress,forge,deckService,cacheDi
     const record=byLine.get(finding.sourceLine);if(!record||record.source.game!==game.game)throw Object.assign(Error('复盘引用了未经搜索的节点。'),{sourceLines:[finding.sourceLine]});
     if(finding.confidence==='high')finding.confidence='medium';
     const tested=record.result.quality?.keep?routeFromTrace(record.result.representative):[];if(tested.length){finding.proposedLine=tested;finding.manaAudit.paymentPlan=tested.map(s=>(s.cardName||'Pass priority')+'：'+s.payment);}
-    if(!record.result.quality?.keep&&finding.severity==='mistake'){finding.severity='alternative';finding.analysis+=' 本轮未保留经胜负及AI二筛认可的改进路线。';}
-    if(finding.severity==='mistake'&&(!record.result.comparison.matched||record.result.comparison.meanDifference<45||record.result.comparison.perWorldDifferences.some(w=>w.difference<=0))){finding.severity='alternative';finding.analysis+=' 当前搜索不足以把原操作定为明确失误。';}
+    const proof=record.result.pairedVerification;
+    if(record.result.quality?.keep&&proof?.status!=='supported'){
+      finding.severity='alternative';
+      const refutation=proof?.discovery.find(probe=>probe.arm==='alternative'&&probe.outcome&&probe.outcome.value<1);
+      finding.recommended=proof?.alternative?'复盘时对照 '+proof.alternative+'。'+(refutation?
+        '测试中，对手用 '+refutation.reply+' 后，改线未能取胜。':'用回放核对这条路线实际打开的下一次机会。'):'查看回放中的替代路线。';
+    }
+    if(finding.severity==='mistake'&&proof?.status!=='supported')finding.severity='alternative';
   }
   for(const hand of candidate.hiddenHands)hand.confidence='low';
   return LegacyProtocol.validateReview(candidate,model);
@@ -187,7 +209,7 @@ async function runForgeReview({job,replay,ask,progress,forge,deckService,cacheDi
       const replacements=new Map(patch.replacements.map(p=>[p.originalSourceLine,p.finding]));for(const g of review.games)g.findings=g.findings.map(f=>replacements.get(f.sourceLine)||f);
     }else review=await ask(job,prompt+'\n上次结果未通过：'+error.message+'。修正结构与引用，不能虚构证据。',S.review);
   }
-  const outcome={review,evidence,unsupported,sideboardPlans:matchDecks.sideboardPlans,deckProfiles:publicDeckProfile(matchDecks),engine:forge.engine||baseEngine,reviewVersion:'forge-search-v2-wins',completedAt:new Date().toISOString()};
+  const outcome={review,evidence,unsupported,sideboardPlans:matchDecks.sideboardPlans,deckProfiles:publicDeckProfile(matchDecks),engine:forge.engine||baseEngine,reviewVersion:REVIEW_VERSION,completedAt:new Date().toISOString()};
   job.abort.signal.throwIfAborted();
   await fs.mkdir(cacheDir,{recursive:true});
   const cacheFile=path.join(cacheDir,replay.id+'.json'),temporary=cacheFile+'.'+job.id+'.tmp';
@@ -200,4 +222,4 @@ async function runForgeReview({job,replay,ask,progress,forge,deckService,cacheDi
   job.result={...outcome,reviewPending:false,reviewRevision:job.result.reviewRevision+1,gameStages:games.map(game=>({game,message:`已完成 ${records.filter(r=>r.source.game===game).length} 个搜索节点`}))};
   return outcome;
 }
-module.exports={runForgeReview,prepareNode,seeds,compactEvidence,ensureMatchDecks,prepareOnly,shortlistOnly,buildWorlds,writeWinningReplays,publicDeckProfile};
+module.exports={REVIEW_VERSION,runForgeReview,prepareNode,seeds,compactEvidence,ensureMatchDecks,prepareOnly,shortlistOnly,buildWorlds,writeWinningReplays,publicDeckProfile};
