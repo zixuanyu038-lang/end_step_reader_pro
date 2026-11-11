@@ -2,6 +2,7 @@
 const {test}=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs/promises'),os=require('node:os'),path=require('node:path'),zlib=require('node:zlib');
 const R=require('../replay'),S=require('../studio-schema'),P=require('../studio-protocol'),Scenario=require('../scenario'),{Cards}=require('../card-lookup'),{createStudio}=require('../studio-server');
 const {runReview}=require('../review-runner'),{createModelQueue}=require('../model-queue');
+const {ForgePool}=require('../forge-client'),{readForgeOptions}=require('../forge-findings');
 const card=(id,name,types,extra={})=>({id,name,types,subtypes:[],supertypes:[],ownerId:'1',controllerId:'1',zone:'Hand',manaCost:'{R}',power:0,toughness:0,tapped:false,faceDown:false,damage:0,counters:{},keywords:[],oracleText:'',...extra});
 const mountain=card(10,'Mountain',['Land'],{zone:'Battlefield',subtypes:['Mountain'],supertypes:['Basic'],manaCost:'no cost'}),bolt=card(11,'Lightning Bolt',['Instant'],{oracleText:'Lightning Bolt deals 3 damage to any target.'});
 const player=(id,name)=>({id,name,life:id==='0'?3:20,hand:[],handSize:0,librarySize:2,battlefield:[],graveyard:[],exile:[],manaPool:{}});
@@ -59,6 +60,19 @@ test('completed games are published before the slow game and are cached independ
  try{for(let i=0;i<50&&!job.result?.review?.games.length;i++)await new Promise(r=>setTimeout(r,5));assert.deepEqual(job.result.review.games.map(g=>g.game),[2]);assert.equal(job.result.reviewPending,true);}finally{release();}
  const result=await pending;assert.deepEqual(result.games.map(g=>g.game),[1,2]);assert.equal(generated,2);
  await runReview({job:{dir,abort:new AbortController()},replay,ask,progress(){},cacheDir:path.join(dir,'cache')});assert.equal(generated,2);
+});
+test('Forge search settings enforce the pool limit and control the workers used for a task',async()=>{
+ const forge=new ForgePool({workers:3});
+ try{
+   assert.deepEqual(readForgeOptions(null,forge),{discoveryWorlds:3,holdoutWorlds:4,candidatesPerNode:1,maxComparisons:4,workers:3});
+   const options={discoveryWorlds:5,holdoutWorlds:8,candidatesPerNode:2,maxComparisons:6,workers:1};
+   assert.deepEqual(readForgeOptions(options,forge),options);
+   assert.throws(()=>readForgeOptions({holdoutWorlds:0},forge),/Forge/);
+   assert.throws(()=>readForgeOptions({discoveryWorlds:3.5},forge),/Forge/);
+   assert.throws(()=>readForgeOptions({workers:4},forge),/Forge/);
+   const workers=await forge.mapWorlds([0,1,2],async(_,i,worker)=>forge.workers.indexOf(worker),undefined,options.workers);
+   assert.deepEqual(workers,[0,0,0]);
+ }finally{forge.close();}
 });
 test('HTTP workflow dispatches Forge runners, persists results and rejects cross-origin writes',async(t)=>{
  const dir=await fs.mkdtemp(path.join(os.tmpdir(),'endstep-studio-test-'));let reviews=0,branches=0;

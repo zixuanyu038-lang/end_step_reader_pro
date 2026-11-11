@@ -129,7 +129,7 @@ class ForgePool {
     }
     return {result,reused:false};
   }
-  async mapWorlds(worlds,visit,signal){
+  async mapWorlds(worlds,visit,signal,workers=this.workers.length){
     let next=0,failure;
     const results=new Array(worlds.length);
     const run=async worker=>{
@@ -141,7 +141,7 @@ class ForgePool {
         }catch(error){failure??=error;}
       }
     };
-    await Promise.all(this.workers.slice(0,worlds.length).map(run));
+    await Promise.all(this.workers.slice(0,Math.min(workers,worlds.length)).map(run));
     if(failure)throw failure;
     return results;
   }

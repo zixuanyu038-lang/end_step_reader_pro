@@ -59,8 +59,8 @@ function originalSelection(source,actions){
 class Node {
   constructor({path=[],action=null,parent=null,state=null,actions=[]}={}){Object.assign(this,{path,action,parent,state,actions});this.children=[];this.visits=0;this.total=0;this.reward=0;this.rejected=[];}
 }
-async function mapSearchWorlds(client,worlds,visit,signal){
-  if(client.mapWorlds)return client.mapWorlds(worlds,visit,signal);
+async function mapSearchWorlds(client,worlds,visit,signal,workers){
+  if(client.mapWorlds)return client.mapWorlds(worlds,visit,signal,workers);
   const results=[];
   for(const [i,world] of worlds.entries()){
     signal?.throwIfAborted();

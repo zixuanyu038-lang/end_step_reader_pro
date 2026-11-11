@@ -161,6 +161,15 @@
             phase:phase(state?.step||state?.phase),text:'让过优先权',quiet:true,stateIndex,raw:r.action,rawRecord:lines[lineNo]});
         continue;
       }
+      if(r.k==='priority-phase'||r.k==='priority-window'){
+        const turn=model.turns.findLast(turn=>turn.game===r.game&&Number(turn.number)===r.turn);
+        if(turn){
+          const stateIndex=r.state?model.states.push(r.state)-1:turn.stateIndex;
+          turn.entries.push({sourceLine:lineNo+1,t:r.t||0,type:'RECOVERED_PRIORITY',kind:'补全',phase:phase(r.phase),
+            text:r.k==='priority-phase'?'补全阶段':'补全优先权 · 玩家 '+r.priorityPlayerId,quiet:false,stateIndex,raw:r,rawRecord:lines[lineNo]});
+        }
+        continue;
+      }
       if(r.k!=='event'){model.warnings.push(`第 ${lineNo+1} 行记录类型 ${r.k} 未识别，未解释。`);continue;}
       const e=r.event;if(!e||typeof e!=='object')throw Error(`第 ${lineNo+1} 行缺少事件对象。`);
       model.eventCount++;

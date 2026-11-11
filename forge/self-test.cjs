@@ -32,6 +32,15 @@ async function checkForgeRuntime(client){
   const intentRun=await client.request({command:'simulate',root:replacement,path:[],includeTrace:true,horizonTurns:1});
   assert.equal(intentRun.intentStatus.completed,1);
   assert.ok(!intentRun.trace.some(f=>f.action?.cardName==='Consign to Memory'&&f.state.stack.some(item=>item.isTrigger&&item.sourceCard.id===9)),'The replaced spell stays banned during the original exchange');
+
+  const impending={...root,impending:[12],stateText:root.stateText.replace('p1battlefield=Mountain|Id:10',
+    'p1battlefield=Mountain|Id:10;Overlord of the Balemurk|Id:12|Counters:TIME=4')};
+  const walk=await client.request({command:'walk-priority',root:impending,throughTurn:3,throughPhase:'END_OF_TURN',exhaustive:true});
+  const restored=walk.windows.map(w=>w.state.players[1].battlefield.find(c=>c.id===12));
+  assert.deepEqual(restored[0].types,['Enchantment']);
+  assert.equal(restored[0].counters.TIME,4);
+  assert.ok(restored.every(c=>!c.isAttacking&&!c.types.includes('Creature')));
+  assert.ok(restored.some(c=>c.counters.TIME===3),'Impending removes a time counter at the end step');
 }
 
 async function checkRaptorTrigger(client){

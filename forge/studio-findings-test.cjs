@@ -12,7 +12,8 @@ async function main(){
   const [initialReplay,profileFile,directory,gameArg='1',expected]=process.argv.slice(2);
   assert.ok(initialReplay&&profileFile&&directory,'Pass a replay, cached deck profile, output directory and optional game number.');
   const dataDir=path.join(path.resolve(directory),'data'),game=Number(gameArg);
-  const forge=new ForgePool({dataDir,workers:4,javaHeap:'2g',activeProcessors:2});
+  const forge=new ForgePool({dataDir,workers:Number(process.env.STUDIO_TEST_WORKERS)||4,javaHeap:'2g',activeProcessors:2});
+  const forgeOptions=JSON.parse(process.env.STUDIO_TEST_FORGE_OPTIONS||'null');
   const cached=path.join(forgeCacheDir(forge,dataDir),'forge-reviews');
   await fs.mkdir(cached,{recursive:true});
   await fs.copyFile(profileFile,path.join(cached,path.basename(profileFile)));
@@ -36,7 +37,7 @@ async function main(){
     assert.ok(priorities.some(n=>n.kind==='pass')&&priorities.some(n=>n.kind==='play'));
     async function run(comparisonPlan){
       const started=await json('/api/jobs',{method:'POST',
-        body:JSON.stringify({type:'forge-findings',replayId:current.id,game,comparisonPlan})});
+        body:JSON.stringify({type:'forge-findings',replayId:current.id,game,comparisonPlan,forgeOptions:comparisonPlan?undefined:forgeOptions})});
       let last='';
       for(;;){
         const job=await json('/api/jobs/'+started.id);
@@ -47,9 +48,24 @@ async function main(){
       }
     }
     const find=await run();
-    assert.equal(find.result.priority.length,priorities.length);
+    if(forgeOptions){
+      for(const [key,value] of Object.entries(forgeOptions))assert.equal(find.result.forgeOptions[key],value);
+      assert.ok(find.result.comparisons.length<=find.result.forgeOptions.maxComparisons);
+      for(const {plan} of find.result.comparisons){
+        assert.equal(plan.discoveryWorlds,find.result.forgeOptions.discoveryWorlds);
+        assert.equal(plan.holdouts,find.result.forgeOptions.holdoutWorlds);
+      }
+    }
+    assert.equal(find.result.priority.length,priorities.length+find.result.recovered);
+    const completed=await request(find.result.completedReplayUrl);
+    const completedText=zlib.gunzipSync(Buffer.from(await completed.arrayBuffer())).toString('utf8');
+    const completionRows=completedText.split(/\r?\n/).filter(line=>line.includes('"k":"priority-window"')).map(JSON.parse);
+    assert.equal(completionRows.length,find.result.recovered);
+    assert.ok(!Replay.parse(completedText).warnings.some(w=>w.includes('状态恢复失败')));
     for(const line of (process.env.STUDIO_REQUIRED_PRIORITY_LINES||'').split(',').filter(Boolean).map(Number))
       assert.equal(find.result.priority.find(n=>n.sourceLine===line)?.status,'compared','Required priority node was not compared');
+    for(const line of (process.env.STUDIO_REQUIRED_RECOVERED_LINES||'').split(',').filter(Boolean).map(Number))
+      assert.ok(find.result.priority.find(n=>n.sourceLine===line)?.recovery,'Required priority window was not restored');
     const signature=job=>job.result.comparisons.map(c=>({line:c.line,world:c.world,prefix:c.prefix.map(a=>a.key),
       arms:c.arms.map(a=>[a.action.key,a.result,a.turn])}));
     assert.ok(find.result.comparisons.length>0,'The real fixture should produce key decisions.');

@@ -177,6 +177,10 @@ function buildWorld(source,decks,catalog,seed,{stressCard=null,stressCards=[]}={
   const root={stateText:lines.join('\n')+'\n',seed,viewerId:Number(source.header.seat),names:state.players.map(p=>p.name),gameId:state.gameId,activePlayerId:Number(state.activePlayerId),priorityPlayerId:Number(state.priorityPlayerId),firstPriorityId:source.firstPriorityId,history:source.historyCounters,cardHistory:source.cardHistory,decks:adaptedDecks,stack:state.stack||[],spellHistory:source.spellHistory||[],tokens:state.players.flatMap(p=>ZONES.flatMap(z=>p[z]||[]).filter(c=>c.isToken&&c.name==='Thundertrap Trainer')),statuses:state.players.map(p=>({hasMonarch:!!p.hasMonarch,hasInitiative:!!p.hasInitiative,hasCitysBlessing:!!p.hasCitysBlessing,companion:(p.commandZone||[]).find(c=>c.isCompanion),
       commandEffects:(p.commandZone||[]).filter(c=>!c.isCommander&&!c.isCompanion)}))};
   if(combat)root.combat=combat;
+  const impending=state.players.flatMap(p=>p.battlefield||[]).filter(c=>!c.types?.includes('Creature')&&
+    Object.entries(c.counters||{}).some(([key,count])=>key.toUpperCase()==='TIME'&&count>0)&&
+    c.keywords?.some(k=>/^Impending\b/i.test(k))).map(c=>Number(c.id));
+  if(impending.length)root.impending=impending;
   const scenario=customApplied.length?{kind:'custom-interaction-stress',cards:customApplied,basis:'Player-specified cards in the opponent’s hidden hand, from the fixed deck.'}:stressApplied?{kind:'targeted-interaction-stress',card:stressRequested,basis:'explicitly assumes one plausible interaction card from the fixed deck; not a probability sample'}:{kind:'deck-sampled-hidden-hand'};
   const id=crypto.createHash('sha256').update(JSON.stringify({root,version:1,...(customApplied.length?{scenario}:{})})).digest('hex');
   return{id,root,assumptions,hiddenHands:hands,libraries,sourceUrls:decks.map(d=>d.url),scenario};
@@ -206,6 +210,7 @@ function auditRoot(source,actual){
         same(d.name,c.name,'牌面 '+c.name);
         if(c.isCompanion)same(!!d.isCompanion,true,'已宣告行侣 '+c.name);
         if(zone==='battlefield'){
+          same(d.types?.includes('Creature')||false,c.types?.includes('Creature')||false,'生物类别 '+c.name);
           same(!!d.isAttacking,!!c.isAttacking,'攻击状态 '+c.name);
           same(!!d.isBlocking,!!c.isBlocking,'阻挡状态 '+c.name);
           if(c.isAttacking)same(Number(d.attackingDefenderId),Number(c.attackingDefenderId),'攻击目标 '+c.name);

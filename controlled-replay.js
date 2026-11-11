@@ -85,7 +85,7 @@ function describeTrace(run,source){
   return {winner:run.state.winnerId??null,viewer,final,highlights,opening:actions.slice(0,7),closing,lifeChanges:swing.slice(-5)};
 }
 
-async function controlledComparison({source,world,plan,worker,signal}){
+async function controlledComparison({source,world,plan,worker,signal,actor=source.header.seat}){
   const {name,baselineKey,alternateKey}=plan;
   assert.ok(typeof name==='string'&&name.length>0&&name.length<=80&&path.basename(name)===name&&
     !/[<>:"/\\|?*\x00-\x1f]/.test(name),'Invalid comparison name.');
@@ -94,12 +94,12 @@ async function controlledComparison({source,world,plan,worker,signal}){
   const prefix=(plan.prefix||[]).map(compact);
   const request=(command,actions,includeTrace=false)=>worker.request({
     command,root:world.root,path:actions,includeTrace,enumerateChoices:true,
-    exhaustive:true,skipForcedPasses:true,horizonTurns:100
+    exhaustive:true,skipForcedPasses:!plan.recovery,horizonTurns:100
   },{signal});
   const fork=prefix.length?await request('expand',prefix):initial;
   const actions=[baselineKey,alternateKey].map(key=>fork.actions.find(action=>action.key===key));
   assert.ok(fork.stopReason==='decision'&&actions.every(Boolean)&&
-    actions.every(action=>String(action.actorId)===String(source.header.seat)),
+    actions.every(action=>String(action.actorId)===String(actor)),
     'Both moves must be legal at the same decision for the replay player.');
   const arms=[];
   const targetName=reference=>{

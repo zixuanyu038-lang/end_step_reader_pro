@@ -1,7 +1,7 @@
 'use strict';
 (function(){
   const el=id=>document.getElementById(id),html=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  const state={backend:false,ready:false,loggedIn:false,replayId:null,model:null,review:null,shortlist:null,line:null,route:[],edits:new Map(),stressDrafts:new Map(),plans:new Map(),branchChecks:new Map(),job:null,poll:null,result:null,reviewPending:false,reviewRevision:null,evidence:[],deckProfiles:null,sideboardPlans:[],forgeInstalled:false,version:0,priorityNodes:[],priorityResults:new Map()};
+  const state={backend:false,ready:false,loggedIn:false,replayId:null,model:null,review:null,shortlist:null,line:null,route:[],edits:new Map(),stressDrafts:new Map(),plans:new Map(),branchChecks:new Map(),job:null,poll:null,result:null,reviewPending:false,reviewRevision:null,evidence:[],deckProfiles:null,sideboardPlans:[],forgeInstalled:false,forgeSettings:null,version:0,priorityNodes:[],priorityResults:new Map()};
   const actions={cast:'施放',activate:'起动异能',play_land:'下地',pass:'让过',phase:'推进阶段',choice:'选择',combat:'战斗'};
   const confidence={high:'较高',medium:'中等',low:'较低'},severity={mistake:'可改进',alternative:'可选路线',good:'合理操作'};
   async function api(url,options={}){
@@ -13,7 +13,7 @@
     const node=state.priorityNodes.find(node=>node.sourceLine===line);
     const turn=node&&model?.turns.find(t=>t.game===node.game&&Number(t.number)===node.turn);
     if(!turn)return null;
-    const index=Math.max(0,turn.entries.findLastIndex(e=>e.sourceLine<line));
+    const index=Math.max(0,turn.entries.findLastIndex(e=>e.sourceLine<(node.anchorLine??line)));
     return {turn,index,entry:{...turn.entries[index],sourceLine:line,t:node.t,phase:Replay.phase(node.phase),text:node.cardName}};
   }
   function renderPriorities(){
@@ -37,14 +37,46 @@
           (checked?'<small> '+html(states[checked.status]||'')+(checked.reason?' · '+html(checked.reason):'')+'</small>':'')+'</li>';
       }).join('')+'</ul>').join('')+'</details>').join('');
   }
+  function acceptPriorities(job){
+    const nodes=job.result?.priority;
+    if(!nodes)return;
+    for(const node of nodes)state.priorityResults.set(node.sourceLine,node);
+    if(nodes.some(node=>node.kind==='recovered'))state.priorityNodes=state.priorityNodes.filter(node=>node.game!==job.game).concat(nodes);
+  }
   const findings=()=>state.review?.games.flatMap(g=>g.findings.map(f=>({...f,game:g.game})))||[];
   const deckSides=['own','opponent'];
   const branchLabels={ready:'可恢复',unsupported:'不可直接恢复',unavailable:'校验暂不可用',checking:'正在校验',unchecked:'待校验'};
   const branchStatus=line=>state.branchChecks.get(line)?.status||'unchecked';
   const branchBadge=line=>`<small class="branch-badge" data-branch-state="${branchStatus(line)}">${branchLabels[branchStatus(line)]}</small>`;
   const jobNames={review:'整盘复盘',prepare:'准备对局',shortlist:'AI 初筛',plan:'提炼新打法',search:'Forge 搜索',quality:'AI 二筛',branch:'分支重演','forge-findings':'Forge 关键手'};
+  const settingsKey='endstep-forge-search-settings';
+  const forgeInputs=()=>Object.keys(state.forgeSettings||{}).map(key=>[key,el('forge-'+key)]);
+  const samplingLabel=o=>'初筛 '+o.discoveryWorlds+' 组 · 复核 '+o.holdoutWorlds+' 组';
+  function readForgeFields(showErrors=false){
+    if(!state.forgeSettings)return undefined;
+    const fields=forgeInputs(),invalid=fields.find(([,input])=>!input.validity.valid||!Number.isInteger(input.valueAsNumber));
+    if(invalid){
+      if(showErrors){el('studio-search-settings').open=true;invalid[1].reportValidity();}
+      return null;
+    }
+    return Object.fromEntries(fields.map(([key,input])=>[key,input.valueAsNumber]));
+  }
+  function showForgeSettings(save=false){
+    const options=readForgeFields();
+    el('forge-settings-summary').textContent=options?samplingLabel(options):'';
+    if(save&&options)try{localStorage.setItem(settingsKey,JSON.stringify(options));}catch{}
+  }
+  function applyForgeSettings(values={}){
+    for(const [key,input] of forgeInputs()){
+      const spec=state.forgeSettings[key],value=values?.[key];
+      input.min=spec.min;input.max=spec.max;
+      input.value=Number.isInteger(value)&&value>=spec.min&&value<=spec.max?value:spec.default;
+    }
+    showForgeSettings();
+  }
   function controls(){
     const busy=state.job?.status==='running';
+    el('forge-search-options').disabled=busy||!state.forgeSettings;
     const inputs=el('studio-deck-sources');inputs.hidden=!state.replayId;inputs.disabled=busy;
     let needsFile=false,showFormat=false;
     for(const side of deckSides){
@@ -63,8 +95,10 @@
     el('studio-apply-sideboard').disabled=!available||needsFile;
     el('studio-shortlist').disabled=!modelAvailable;
     el('studio-prepare').textContent=state.deckProfiles?'重新准备':'准备对局';
-    el('studio-preparation-note').textContent=state.deckProfiles?'对局已准备。Forge 可以自己找关键手，并生成两份可对照的回放。':'准备牌表后，让 Forge 自己找能改变胜负的决策。';
-    el('studio-review').textContent=state.review?'重新复盘 ↗':'生成整盘复盘 ↗';
+    const preparation=el('studio-preparation-note');
+    preparation.textContent=state.deckProfiles?'已准备':'等待准备牌表';
+    preparation.classList.toggle('is-ready',!!state.deckProfiles);
+    el('studio-review').textContent=state.review?'重新生成 AI 辅助复盘':'生成 AI 辅助复盘';
     const hasIntent=state.review||el('studio-intent')?.value.trim();
     for(const id of ['studio-generate','studio-extract']){const b=el(id);if(b)b.disabled=!available||!state.deckProfiles||state.reviewPending||!hasIntent||branchStatus(state.line)!=='ready';}
     const quality=el('studio-screen-search');if(quality)quality.disabled=!available;
@@ -214,6 +248,14 @@
   }
   function renderNode(){
     const selected=entryAt(state.line);if(!selected)return;
+    const priority=state.priorityResults.get(state.line);
+    if(priority?.recovery){
+      const {from,to}=priority.recovery;
+      el('review-node').innerHTML=`<div class="review-node-heading"><div><p class="eyebrow">第 ${priority.game} 局 / T${priority.turn} / ${html(Replay.phase(priority.phase))}</p><h3>${html(priority.cardName)}</h3></div></div>`+
+        `<p class="review-analysis">Forge 从原回放第 ${from} 行推进，在第 ${to} 行的录像局面核对通过。${priority.status==='compared'?'已纳入对照搜索。':html(priority.reason||'当前没有完成的改法对照。')}</p>`+
+        (state.result?.completedReplayUrl?`<a class="text-button" href="${html(state.result.completedReplayUrl)}" download>下载补全后的回放 ↓</a>`:'');
+      controls();return;
+    }
     const original=findings().find(f=>f.sourceLine===state.line),plan=state.plans.get(state.line),f=plan?{...original,title:original?.title||'新打法',observed:original?.observed||selected.entry.text,analysis:original?.analysis||'',recommended:plan.understoodIntent,confidence:'medium',hiddenInformation:plan.assumptionsNeeded,manaAudit:plan.manaAudit}:original,audit=f?.manaAudit;
     const test=state.evidence.find(e=>e.sourceLine===state.line)?.turningTest,point=test?.key;
     const hidden=state.review?.hiddenHands.filter(h=>h.sourceLine===state.line)||[],retained=state.evidence.find(e=>e.sourceLine===state.line&&e.quality?.keep&&e.downloadUrl);
@@ -236,14 +278,19 @@
   }
   function locate(){const found=entryAt(state.line);if(!found)return;game=found.turn.game;selected=found.turn.id;focused=found.index;branchSnapshot=null;query='';el('search').value='';if(!Replay.visible(found.entry,detailed)){detailed=true;el('detail').textContent='完整记录';el('detail').setAttribute('aria-pressed','true');}renderGames();render();switchView('report');revealSelectedTurn();el('events').querySelector(`[data-entry="${focused}"]`)?.scrollIntoView({block:'center'});}
   function renderResult(){
-    const r=state.result;el('studio-result').hidden=!r;if(!r)return;
+    const r=state.result,findingsResult=el('studio-findings-result'),branchResult=el('studio-result');
+    findingsResult.hidden=!r?.comparisons;
+    branchResult.hidden=!r||!!r.comparisons;
+    if(!r)return;
     if(r.comparisons){
       const status={win:'赢',loss:'输',draw:'平局'};
       const actionText=s=>String(s||'').split(' — ')[0];
       const armHtml=a=>{
         const evidence=a.reason;
         const finish=evidence.final.map(p=>(p.id===evidence.viewer?'我方':'对手')+'生命 '+p.life).join('，');
-        return '<div><h4>'+html(a.role+' · '+actionText(a.action.label)+' · T'+a.turn+' '+(status[a.result]||'平局'))+'</h4>'+
+        return '<div class="studio-comparison-arm"><div class="studio-arm-heading"><span>'+html(a.role)+'</span>'+
+          '<span class="studio-outcome" data-outcome="'+html(a.result)+'">'+html('T'+a.turn+' · '+(status[a.result]||'平局'))+'</span></div>'+
+          '<h5>'+html(actionText(a.action.label))+'</h5>'+
           ((a.action.modes||[]).length?'<p>'+html(a.action.modes.join(' / '))+'</p>':'')+
           ((a.action.targets||[]).length?'<p>'+html('目标 '+a.action.targets.join('、'))+'</p>':'')+
           '<p>'+html((evidence.highlights||[]).join('。')||finish)+'</p><details><summary>查看后续操作和终局记录</summary>'+
@@ -251,18 +298,22 @@
           '<p>'+html(evidence.closing.join(' / '))+'</p></details>'+
           '<a class="text-button" href="'+html(a.downloadUrl)+'" download>下载 '+html(a.role)+' .esreplay ↓</a></div>';
       };
-      el('studio-result').innerHTML='<h3>Forge 单变量对照</h3><p>两份回放共享局面、暗手和牌库。只替换指定决策，之后两边用同样的 Forge 策略打到终局。</p>'+
-        (r.scanned==null?'':'<p>检查了 '+r.scanned+' 个录像决策，其中 '+r.compared+' 个完成对照。</p>')+
+      findingsResult.innerHTML='<div class="studio-result-heading"><div><h3>Forge 搜索结果</h3><p>两份回放只替换一个决策，使用相同的局面、暗手、牌库和后续 Forge 策略。</p></div>'+
+        '<div class="node-links">'+(r.completedReplayUrl?'<a class="text-button" href="'+html(r.completedReplayUrl)+'" download>下载补全后的回放 ↓</a>':'')+
+        (r.planUrl?'<a class="text-button" href="'+html(r.planUrl)+'" download>下载复现计划 ↓</a>':'')+'</div></div>'+
+        (r.scanned==null?'':'<p class="studio-result-count">检查 '+r.scanned+' 个决策'+(r.recovered==null?'':' · 补全 '+r.recovered+' 个窗口')+' · 完成 '+r.compared+' 个对照 · 保留 '+r.comparisons.length+' 个关键手</p>')+
+        (r.forgeOptions?'<p class="studio-result-count">'+html(samplingLabel(r.forgeOptions)+' · 每节点最多复核 '+r.forgeOptions.candidatesPerNode+' 种打法 · '+r.forgeOptions.workers+' 个进程')+'</p>':'')+
         (r.comparisons.length?'':'<p>本轮复核未保留胜负改变或显著提速的对照。</p>')+
-        r.comparisons.map(c=>'<article class="review-node"><h4>'+html(c.name)+'</h4>'+
-          '<button type="button" class="text-button" data-findings-line="'+c.line+'">查看原局操作 ↗</button>'+
+        r.comparisons.map(c=>'<article class="studio-comparison"><div class="studio-result-heading"><h4>'+html(c.name)+'</h4>'+
+          '<button type="button" class="text-button" data-findings-line="'+c.line+'">查看决策节点 ↗</button></div>'+
+          (c.comparisonBaseline==='pass'?'<p>这个窗口没有录下操作，使用让过作对照。</p>':'')+
           (c.holdout?'<p>'+html('独立暗手 '+c.holdout.compared+' 组，按目标翻转 '+c.holdout.flips+' 组，反向 '+c.holdout.reverse+' 组，提前获胜 '+c.holdout.faster+' 组。')+'</p>':'')+
-          '<div class="deck-source-grid">'+c.arms.map(armHtml).join('')+'</div></article>').join('')+
-        (r.planUrl?'<a class="text-button" href="'+html(r.planUrl)+'" download>下载复现计划 ↓</a>':'');
-      return;
+          '<div class="studio-comparison-arms">'+c.arms.map(armHtml).join('')+'</div></article>').join('');
+      return findingsResult;
     }
     const engine=r.validationLevel==='forge-executed-audited-root';
     el('studio-result').innerHTML='<p class="eyebrow">'+(r.complete?'本局完整假设后续':'搜索片段 · 未到终局')+'</p><h3>'+html(r.title)+'</h3><p>'+html(r.summary)+'</p>'+(r.quality?.keep?'<p class="review-recommendation">AI 胜局二筛：'+html(r.quality.reason)+'</p>':'')+'<div class="studio-downloads"><a class="primary" href="'+html(r.downloadUrl)+'" download>下载 '+(r.complete?'本局完整回放':'搜索片段')+' .esreplay ↓</a><a class="text-button" href="https://endstep.cc/replay/local" target="_blank" rel="noreferrer">在 Endstep 打开 ↗</a></div>'+((r.intentStatus?.blocked||[]).length?'<p class="intent-issues">部分目标未能完成：'+html(r.intentStatus.blocked.join('；'))+'</p>':'')+'<details class="result-assumptions"><summary>固定手牌与推演假设</summary>'+(r.hiddenHands||[]).map(h=>'<p><b>'+html(playerName(h.playerId))+'</b>：'+html(h.cards.join(' / '))+'</p>').join('')+(r.assumptions||[]).map(a=>'<p>'+html(a.basis)+'</p>').join('')+'</details><details><summary>执行记录</summary><p>'+html(r.verification)+'</p><p>'+(engine?'由 Forge 2.0.15 执行，起点经过恢复核对。结论仅属于选定的隐藏信息假设，不能当作原局真实后续或胜率。':'此文件来自旧版模型推演流程，未经 Forge 执行。')+'</p></details>';
+    return branchResult;
   }
   function acceptEvidence(data){
     if(data.evidence&&!data.downloadUrl)state.evidence=data.evidence;
@@ -297,11 +348,8 @@
       }
       if(job.status==='running'){state.poll=setTimeout(()=>watch(id,version),1500);return;}
       if(job.status==='complete'){
-        if(job.result.priority){
-          for(const node of job.result.priority)state.priorityResults.set(node.sourceLine,node);
-          renderPriorities();
-        }
-        if(job.result.downloadUrl||job.type==='forge-findings'){state.result=job.result;renderResult();el('studio-result').scrollIntoView({block:'nearest'});}
+        if(job.result.priority){acceptPriorities(job);renderPriorities();}
+        if(job.result.downloadUrl||job.type==='forge-findings'){state.result=job.result;renderResult()?.scrollIntoView({block:'nearest'});}
       }
     }catch(error){if(version!==state.version)return;el('studio-job-message').textContent='连接暂时中断，正在重连…';state.poll=setTimeout(()=>watch(id,version),4000);}
   }
@@ -309,6 +357,8 @@
     const version=state.version;
     const nodeJob=['plan','search','branch'].includes(type),sourceLine=nodeJob||type==='quality'?state.line:null;
     if(nodeJob&&branchStatus(sourceLine)!=='ready')return;
+    const forgeOptions=type==='forge-findings'&&!comparisonPlan?readForgeFields(true):undefined;
+    if(forgeOptions===null)return;
     try{
       preserveEdits();const intent=['review','shortlist'].includes(type)?el('review-focus').value.trim():el('studio-intent')?.value||'';
       state.job={type,sourceLine,status:'running',message:'正在提交任务…'};renderJob();
@@ -317,7 +367,7 @@
       if(version!==state.version)return;
       const reviewOptions=type==='review'?{aiShortlist:el('review-ai-shortlist').checked,searchMode:el('review-search-mode').value}:undefined;
       const game=type==='forge-findings'?Number(el('studio-findings-game').value):undefined;
-      const job=await api('/api/jobs',{method:'POST',body:JSON.stringify({type,replayId:state.replayId,sourceLine,parentJobId,focus:intent,deckPreferences,stressCards,reviewOptions,game,comparisonPlan,manualSideboard:deckPreferences?manualSideboard():undefined})});
+      const job=await api('/api/jobs',{method:'POST',body:JSON.stringify({type,replayId:state.replayId,sourceLine,parentJobId,focus:intent,deckPreferences,stressCards,reviewOptions,forgeOptions,game,comparisonPlan,manualSideboard:deckPreferences?manualSideboard():undefined})});
       if(version!==state.version)return;
       state.job=job;renderJob();watch(job.id,version);
     }catch(error){if(version!==state.version)return;state.job={type,sourceLine,status:'failed',message:'提交失败。',error:error.message};renderJob();if(nodeJob&&error.status===409&&state.line===sourceLine)checkSelectedBranch({retry:true});notify(error.message,true);}
@@ -341,6 +391,10 @@
   }
   el('studio-review').onclick=()=>submit('review');
   el('studio-findings').onclick=()=>submit('forge-findings');
+  el('forge-search-options').oninput=()=>showForgeSettings();
+  el('forge-search-options').onchange=()=>showForgeSettings(true);
+  el('forge-more-samples').onclick=()=>{applyForgeSettings({...readForgeFields(),discoveryWorlds:5,holdoutWorlds:8});showForgeSettings(true);};
+  el('forge-reset-options').onclick=()=>{applyForgeSettings();showForgeSettings(true);};
   el('studio-findings-game').onchange=renderPriorities;
   el('studio-priority-list').onclick=e=>{const b=e.target.closest('[data-priority-line]');if(b)openNode(Number(b.dataset.priorityLine));};
   el('studio-comparison-plan').onchange=async event=>{
@@ -362,7 +416,7 @@
   el('studio-deck-sources').addEventListener('change',controls);
   el('studio-cancel').onclick=async()=>{if(state.job)try{await api('/api/jobs/'+state.job.id,{method:'DELETE'});}catch(e){notify(e.message,true);}};
   el('studio-overview').onclick=e=>{const b=e.target.closest('[data-review-line]');if(b)openNode(Number(b.dataset.reviewLine));};
-  el('studio-result').onclick=e=>{const b=e.target.closest('[data-findings-line]');if(b)openNode(Number(b.dataset.findingsLine));};
+  el('studio-findings-result').onclick=e=>{const b=e.target.closest('[data-findings-line]');if(b)openNode(Number(b.dataset.findingsLine));};
   el('review-nodes').onclick=e=>{const b=e.target.closest('[data-review-line]');if(b)openNode(Number(b.dataset.reviewLine));};
   el('review-node').addEventListener('input',e=>{if(['studio-intent','studio-stress-cards'].includes(e.target.id)){preserveEdits();controls();}});
   el('review-node').addEventListener('click',e=>{
@@ -379,6 +433,10 @@
     if(!['http:','https:'].includes(location.protocol)){el('codex-connection').textContent='需启动本地后端';el('manual-workflow').hidden=false;el('studio-review').disabled=true;el('studio-job').hidden=false;el('studio-job-message').textContent='请运行 start.ps1 启动应用；双击 HTML 不能调用 Codex。';el('studio-cancel').hidden=true;return;}
     try{
       const health=await api('/api/health');state.backend=true;state.ready=health.connected;state.loggedIn=health.loggedIn;state.forgeInstalled=!!health.forge?.installed;el('codex-connection').textContent=health.connected?(health.loggedIn?'Codex 已连接':'Codex 尚未登录'):'Codex 连接失败';el('codex-connection').classList.toggle('connected',state.ready&&state.loggedIn);el('studio-model').textContent=health.model?'模型：'+health.model+' · 推理：'+(health.reasoningEffort||'默认'):'模型：沿用本机 Codex 配置';el('studio-model').textContent+=' · '+(state.forgeInstalled?(health.forge.engine||'Forge').replace(/^forge-/,'Forge '):'Forge 未安装，请运行安装Forge.cmd');controls();
+      state.forgeSettings=health.forgeSearchSettings||null;
+      let settings;
+      try{settings=JSON.parse(localStorage.getItem(settingsKey)||'null');}catch{}
+      applyForgeSettings(settings);controls();
       const current=await api('/api/current');
       if(!current){if(model)await onModel(model);return;}
       loadModel(Replay.parse(current.jsonl,current.filename));
@@ -389,7 +447,7 @@
       const prepared=ordered.findLast(j=>j.type==='prepare'&&j.status==='complete'&&j.result?.preparedAt);
       for(const job of ordered)if(job.status==='complete'&&job.createdAt>=(prepared?.createdAt||0)){
         acceptPlan(job);
-        for(const node of job.result?.priority||[])state.priorityResults.set(node.sourceLine,node);
+        acceptPriorities(job);
       }
       renderOverview();renderNodes();renderPriorities();controls();
       const recent=ordered.findLast(j=>j.status==='running')||ordered.findLast(j=>j.status==='complete'||j.errorCode?.startsWith('deck_')||j.status==='failed'&&j.type!=='review');

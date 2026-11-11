@@ -39,51 +39,87 @@
     <section id="jsonl-view" class="jsonl-view" hidden><div class="jsonl-toolbar"><div><h2>原始 JSONL</h2><p>解压后的原始记录，保留行序与数值，不改写数据。</p></div><button id="save-jsonl" class="import-button">保存 .jsonl ↓</button></div><div class="jsonl-controls"><label>记录类型 <select id="raw-kind" aria-label="筛选原始记录类型"><option value="">全部记录</option><option value="header">文件头</option><option value="chapter">chapter · 对局边界</option><option value="event">event · 游戏事件</option><option value="action">action · 玩家操作</option><option value="key">key · 完整快照</option><option value="diff">diff · 状态补丁</option></select></label><input id="raw-search" placeholder="搜索原始行…" aria-label="搜索原始 JSONL"><span id="raw-count"></span></div><textarea id="raw-text" readonly spellcheck="false" aria-label="原始 JSONL 内容" wrap="off"></textarea><p class="raw-footnote">每行是一个 JSON 对象。筛选只影响预览；保存始终导出完整原始文件。</p></section>
     <section id="codex-view" class="codex-view" hidden>
       <section id="studio-panel" class="studio-panel">
-        <header class="studio-heading"><div><h2>复盘工作台</h2><p id="studio-preparation-note">准备牌表后，让 Forge 自己找能改变胜负的决策。</p><span id="studio-model" class="studio-model">模型：读取配置中…</span></div><div class="studio-stage-actions"><button id="studio-prepare" class="import-button" disabled>准备对局</button><button id="studio-findings" class="primary" disabled>Forge 找关键手 ↗</button></div></header>
-        <fieldset class="review-settings">
-          <legend>Forge 关键手</legend>
-          <label for="studio-findings-game">要复盘的一局</label><select id="studio-findings-game" disabled></select>
-          <p class="step-description">从原回放枚举合法改法，分别用相同暗手重放。只保留复核后能改变胜负或明显提前获胜的案例。</p>
-          <label for="studio-comparison-plan">复现已有单变量对照</label>
-          <input type="file" id="studio-comparison-plan" accept=".json,application/json" disabled>
-        </fieldset>
-        <details><summary>AI 辅助复盘</summary>
-        <fieldset class="review-settings">
-          <legend>整盘复盘设置</legend>
-          <label><input id="review-ai-shortlist" type="checkbox" checked> 先由 AI 筛选节点</label>
-          <label for="review-search-mode">搜索预算</label>
-          <select id="review-search-mode" aria-describedby="review-search-note"><option value="standard">标准</option><option value="deep">深度搜索</option></select>
-          <p id="review-search-note">标准最多查 8 个能重跑的节点。败局找救法，胜局找哪一步走错会输。</p>
-          <label for="review-focus">你想重点看哪一手（可选）</label>
-          <input id="review-focus" type="text" maxlength="600" placeholder="例如：我想检查战斗前的费用和展开顺序。">
-          <button id="studio-shortlist" class="import-button" disabled>AI 初筛节点</button><button id="studio-review" class="import-button" disabled>生成 AI 辅助复盘</button>
-        </fieldset>
-        </details>
-        <fieldset id="studio-deck-sources" class="studio-deck-sources" hidden>
-          <legend>牌表来源</legend>
-          <div class="deck-source-grid">
-            <div>
-              <label for="studio-deck-mode-own">己方</label>
-              <select id="studio-deck-mode-own" aria-describedby="studio-deck-hint"><option value="local">本地检索</option><option value="web">AI 联网查找</option><option value="upload">上传牌表</option></select>
-              <input type="file" id="studio-deck-file-own" accept=".txt,.dec,text/plain" aria-label="上传己方牌表" aria-describedby="studio-deck-format" hidden>
+        <header class="studio-heading"><h2>复盘工作台</h2><span id="studio-model" class="studio-model">模型：读取配置中…</span></header>
+        <div class="studio-workflow">
+          <section class="studio-task" aria-labelledby="studio-setup-title">
+            <div class="studio-task-heading">
+              <h3 id="studio-setup-title">对局准备</h3>
+              <p id="studio-preparation-note" role="status">等待准备牌表</p>
             </div>
-            <div>
-              <label for="studio-deck-mode-opponent">对手</label>
-              <select id="studio-deck-mode-opponent" aria-describedby="studio-deck-hint"><option value="local">本地检索</option><option value="web">AI 联网查找</option><option value="upload">上传牌表</option></select>
-              <input type="file" id="studio-deck-file-opponent" accept=".txt,.dec,text/plain" aria-label="上传对手牌表" aria-describedby="studio-deck-format" hidden>
+            <fieldset id="studio-deck-sources" class="studio-deck-sources" hidden>
+              <legend>牌表来源</legend>
+              <div class="deck-source-grid">
+                <div>
+                  <label for="studio-deck-mode-own">己方</label>
+                  <select id="studio-deck-mode-own" aria-describedby="studio-deck-hint"><option value="local">本地检索</option><option value="web">AI 联网查找</option><option value="upload">上传牌表</option></select>
+                  <input type="file" id="studio-deck-file-own" accept=".txt,.dec,text/plain" aria-label="上传己方牌表" aria-describedby="studio-deck-format" hidden>
+                </div>
+                <div>
+                  <label for="studio-deck-mode-opponent">对手</label>
+                  <select id="studio-deck-mode-opponent" aria-describedby="studio-deck-hint"><option value="local">本地检索</option><option value="web">AI 联网查找</option><option value="upload">上传牌表</option></select>
+                  <input type="file" id="studio-deck-file-opponent" accept=".txt,.dec,text/plain" aria-label="上传对手牌表" aria-describedby="studio-deck-format" hidden>
+                </div>
+              </div>
+              <p id="studio-deck-hint">回放含完整牌表时优先使用记录。也可上传任意一方的起始牌表。</p>
+              <p id="studio-deck-format" hidden>请选择英文纯文本牌表，每行如 <code>4 Brainstorm</code>。备牌写在 <code>Sideboard</code> 下，或逐行用 <code>SB:</code> 标记。</p>
+            </fieldset>
+            <div class="studio-task-action"><button id="studio-prepare" class="studio-secondary" disabled>准备对局</button></div>
+            <details id="studio-sideboard" class="studio-sideboard studio-task-details" hidden>
+              <summary>手动换备</summary>
+              <p class="step-description">每局都相对第一局的主牌和备牌填写。每行写数量和完整英文牌名，例如 <code>2 Pyroblast</code>。勾选后留空表示这局不换备。</p>
+              <fieldset id="studio-sideboard-fields"><div id="studio-sideboard-games"></div><button type="button" id="studio-apply-sideboard" class="import-button" disabled>应用换备</button></fieldset>
+            </details>
+          </section>
+          <section class="studio-task studio-task-forge" aria-labelledby="studio-forge-title">
+            <div class="studio-task-heading"><h3 id="studio-forge-title">Forge 关键手搜索</h3></div>
+            <p class="studio-task-description">找出败局里可能翻盘、胜局里可能打丢的操作，生成两份回放供你对照。</p>
+            <div class="studio-task-action">
+              <label for="studio-findings-game">要复盘的一局</label>
+              <select id="studio-findings-game" disabled></select>
+              <button id="studio-findings" class="primary" disabled>开始搜索</button>
             </div>
+            <details class="studio-task-details">
+              <summary>导入复现计划</summary>
+              <label class="studio-field" for="studio-comparison-plan">选择对照计划（.json）</label>
+              <input type="file" id="studio-comparison-plan" accept=".json,application/json" disabled>
+            </details>
+          </section>
+        </div>
+        <details class="studio-options" id="studio-search-settings">
+          <summary>搜索设置 <small id="forge-settings-summary" class="studio-settings-summary"></small></summary>
+          <div class="studio-search-settings-grid">
+            <fieldset id="forge-search-options" class="forge-search-options" disabled>
+              <legend>Forge 关键手搜索</legend>
+              <div class="forge-settings-fields">
+                <label class="studio-field">初筛暗手组数 <input id="forge-discoveryWorlds" type="number" min="1" max="16" step="1" value="3" required></label>
+                <label class="studio-field">独立复核暗手组数 <input id="forge-holdoutWorlds" type="number" min="1" max="32" step="1" value="4" required></label>
+                <label class="studio-field">每节点复核打法数 <input id="forge-candidatesPerNode" type="number" min="1" max="6" step="1" value="1" required></label>
+                <label class="studio-field">最多导出对照数 <input id="forge-maxComparisons" type="number" min="1" max="12" step="1" value="4" required></label>
+                <label class="studio-field">并行进程数 <input id="forge-workers" type="number" min="1" max="1" step="1" value="1" required></label>
+              </div>
+              <p class="step-description">每组暗手用相同牌序跑原打法和改法。组数和复核打法越多，搜索时间越长。</p>
+              <div class="studio-task-action"><button id="forge-more-samples" type="button" class="studio-secondary">加强采样（5 / 8）</button><button id="forge-reset-options" type="button" class="text-button">恢复默认</button></div>
+            </fieldset>
+            <section class="review-settings" aria-labelledby="studio-ai-settings-title">
+            <h3 id="studio-ai-settings-title">AI 辅助复盘</h3>
+            <div class="review-settings-budget">
+              <label for="review-search-mode">搜索预算</label>
+              <select id="review-search-mode" aria-describedby="review-search-note"><option value="standard">标准</option><option value="deep">深度搜索</option></select>
+              <label class="review-settings-check"><input id="review-ai-shortlist" type="checkbox" checked> 先由 AI 筛选节点</label>
+              <p id="review-search-note">标准最多查 8 个能重跑的节点。败局找救法，胜局找哪一步走错会输。</p>
+            </div>
+            <div class="studio-field">
+              <label for="review-focus">复盘重点（可选）</label>
+              <input id="review-focus" type="text" maxlength="600" placeholder="例如：检查战斗前的费用和展开顺序。">
+            </div>
+            <div class="studio-task-action"><button id="studio-shortlist" class="studio-secondary" disabled>AI 初筛节点</button><button id="studio-review" class="import-button" disabled>生成 AI 辅助复盘</button></div>
+            </section>
           </div>
-          <p id="studio-deck-hint">有完整回放牌表时优先使用记录。选择上传可指定对应一方的起始牌表。</p>
-          <p id="studio-deck-format" hidden>请选择英文纯文本牌表，每行如 <code>4 Brainstorm</code>。备牌写在 <code>Sideboard</code> 下，或逐行用 <code>SB:</code> 标记。</p>
-        </fieldset>
-        <details id="studio-sideboard" class="studio-sideboard" hidden>
-          <summary>手动换备</summary>
-          <p class="step-description">每局都相对第一局的主牌和备牌填写。每行写数量和完整英文牌名，例如 <code>2 Pyroblast</code>。勾选后留空表示这局不换备。</p>
-          <fieldset id="studio-sideboard-fields"><div id="studio-sideboard-games"></div><button type="button" id="studio-apply-sideboard" class="import-button" disabled>应用换备</button></fieldset>
         </details>
         <div id="studio-job" class="studio-job" hidden><div><span id="studio-job-label"></span><p id="studio-job-message" role="status"></p></div><button id="studio-cancel" class="text-button">停止</button></div>
         <div id="studio-game-stages" class="studio-game-stages"></div>
-        <details id="studio-priority" hidden><summary id="studio-priority-summary">回合与优先权节点</summary><div id="studio-priority-list"></div></details>
+        <section id="studio-findings-result" class="studio-result studio-findings-result" hidden></section>
+        <details id="studio-priority" class="studio-options" hidden><summary id="studio-priority-summary">回合与优先权节点</summary><div id="studio-priority-list"></div></details>
         <section id="studio-overview" class="studio-overview" hidden></section>
         <div class="review-workspace"><aside class="review-node-rail"><h3>关键节点</h3><div id="review-nodes"><p class="step-description">生成复盘后，按局查看关键决策。也可以在中文战报中点击操作开分支。</p></div></aside><article id="review-node" class="review-node"><div class="review-placeholder"><h3>选择复盘节点</h3><p>复盘会检查法术力基础、费用与支付顺序，并给出具体的新打法。选择节点后，用自然语言表达想改变的打法，由 AI 提炼并重演。</p></div></article></div>
         <section id="studio-result" class="studio-result" hidden></section>

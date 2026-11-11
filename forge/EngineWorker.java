@@ -68,6 +68,8 @@ public final class EngineWorker {
         final Set<String> enumerationGaps=new LinkedHashSet<>();
         List<JsonObject> effectMenu;
         List<Choice> priorityMenu;
+        final List<Object> priorityWalk=new ArrayList<>();
+        int walkTurn=-1,walkPhase=-1;
         int effectActor=-1;
         boolean resolutionChoiceApplied,timedCastApplied;
         JsonArray path;int pathIndex=0,choices=0,step=0,rootTurn=0,viewer=1,maxChoices=400;
@@ -157,6 +159,15 @@ public final class EngineWorker {
             if(context.game.getStack().isEmpty()||context.game.getPhaseHandler().getTurn()!=context.rootTurn)context.initialExchangeOpen=false;
             long decisionSeed=context.root.get("seed").getAsLong()+0x9e3779b97f4a7c15L*context.choices;
             MyRandom.setRandom(new Random(decisionSeed));
+            if(context.walkTurn>=0&&context.pathIndex>=context.path.size()){
+                PhaseHandler phase=context.game.getPhaseHandler();
+                if(phase.getTurn()>context.walkTurn||phase.getTurn()==context.walkTurn&&phase.getPhase().ordinal()>context.walkPhase)
+                    throw new Boundary();
+                List<Choice> choices=candidates(context,actor);
+                Choice pass=choices.stream().filter(choice->choice.ability==null).findFirst().orElseThrow();
+                context.priorityWalk.add(Map.of("state",snapshot(context),"advance",pass.action,"hasAlternatives",choices.size()>1));
+                return null;
+            }
             List<Choice> menu=null;
             if(context.skipForcedPasses&&(!context.rollout||context.pathIndex<context.path.size())){
                 menu=candidates(context,actor);
@@ -341,6 +352,14 @@ public final class EngineWorker {
         c.seats=new ArrayList<>(c.game.getPlayers());
         Loader loader=new Loader();loader.parse(Arrays.asList(str(root,"stateText","").split("\\r?\\n")));loader.apply(c.game);
         for(var entry:loader.identities().entrySet())c.external.put(entry.getValue().getId(),entry.getKey());
+        if(root.has("impending")){
+            for(JsonElement id:root.getAsJsonArray("impending")){
+                Card card=(Card)c.target("c:"+id.getAsInt());
+                SpellAbility cast=card.getFirstSpellAbility().copy(card.getController());
+                cast.setAlternativeCost(AlternativeCost.Impending);card.setCastSA(cast);
+            }
+            c.game.getAction().checkStaticAbilities();
+        }
         if(root.has("tokens"))for(JsonElement entry:root.getAsJsonArray("tokens")){
             JsonObject original=entry.getAsJsonObject();for(Card card:c.game.getCardsInGame())if(c.external(card)==num(original,"id",-1)){
                 require(card.getName().equals("Thundertrap Trainer"),"Unrestored replica token");card.setGamePieceType(GamePieceType.TOKEN);card.setBasePower(1);card.setBaseToughness(1);
@@ -717,6 +736,11 @@ public final class EngineWorker {
         boolean searchProbe=bool(request,"searchProbe",false)&&!bool(request,"includeTrace",false);
         Context c=restore(request.getAsJsonObject("root"),!searchProbe);
         c.exhaustive=bool(request,"exhaustive",false);
+        if(str(request,"command","").equals("walk-priority")){
+            c.walkTurn=num(request,"throughTurn",-1);
+            c.walkPhase=forge.game.phase.PhaseType.valueOf(str(request,"throughPhase","")).ordinal();
+            require(c.walkTurn>=c.rootTurn&&c.walkTurn<=c.rootTurn+1,"Priority walk must end within one turn of its root");
+        }
         c.enumerateChoices=bool(request,"enumerateChoices",false);
         c.expandChoices=c.enumerateChoices&&!simulate;
         c.keepExecuted=bool(request,"includeExecuted",false);
@@ -744,6 +768,7 @@ public final class EngineWorker {
         c.capture("end",stopped);
         JsonObject output=new JsonObject();
         int winner=winnerSeat(c);
+        if(c.walkTurn>=0){output.add("windows",JSON.toJsonTree(c.priorityWalk));return output;}
         if(searchProbe&&simulate){
             JsonObject state=new JsonObject();
             state.addProperty("status",c.game.isGameOver()?"COMPLETE":"ACTIVE");
